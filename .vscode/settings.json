@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "libbpf.h": "c",
+        "fuse.h": "c"
+    }
+}
