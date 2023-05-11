@@ -59,6 +59,8 @@
 #include "qemu/cutils.h"
 #include "passthrough_helpers.h"
 #include "passthrough_seccomp.h"
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
 /* Keep track of inode posix locks for each owner. */
 struct lo_inode_plock {
     uint64_t lock_owner;
@@ -584,50 +586,7 @@ static int fuse_send_msg_ib(struct fuse_session *se, struct fuse_chan *ch,
 	return 0;
 }
 
-static char* find_path_by_ino_2(const char* path, ino_t ino) 
-{
-    DIR* dp;
-    struct dirent* dirp;
-    char* sub_path = NULL;
-    char* child_path = NULL;
-    char* file_path = NULL;
-	char* final_path = NULL;
-	errno = 0;
-    if((dp = opendir(path)) == NULL) {
-		switch (errno) {
-            case EACCES: printf("Permission denied\n"); break;
-            case ENOENT: printf("Directory does not exist\n"); break;
-            case ENOTDIR: printf("'%s' is not a directory\n", path); break;
-        }
-        perror("opendir error");
-        return NULL;
-    }
 
-    while((dirp = readdir(dp)) != NULL) {
-        if(dirp->d_ino == ino) {
-            file_path = strdup(dirp->d_name);
-            break;
-        }
-
-        if(dirp->d_type == DT_DIR &&strcmp(dirp->d_name, ".") != 0 && strcmp(dirp->d_name, "..") != 0) {
-            child_path = (char*)malloc(strlen(path) + strlen(dirp->d_name) + 3);
-            sprintf(child_path, "%s/%s", path, dirp->d_name);
-            sub_path = find_path_by_ino_2(child_path, ino);
-            free(child_path);
-            if(sub_path != NULL) {
-                file_path = (char*)malloc(strlen(sub_path) + strlen(dirp->d_name) + 2);
-                sprintf(file_path, "%s/%s", dirp->d_name, sub_path);
-                free(sub_path);
-                break;
-            }
-        }
-    }
-
-    closedir(dp);
-	final_path = (char*)malloc(strlen(path) + strlen(file_path));
-	sprintf(final_path, "%s/%s", path, file_path);
-    return final_path;
-}
 
 static struct lo_map_elem *lo_map_get(struct lo_map *map, size_t key)
 {
@@ -2774,63 +2733,154 @@ static void lo_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t offset,
 
     fuse_reply_data(req, &buf);
 }
-static void lo_ebpfread(fuse_req_t req, fuse_ino_t ino, size_t size,
+int load_bpf_program(char *path) {
+    struct bpf_object *obj;
+    int ret, progfd;
+    const char* pin_floder = "/sys/fs/bpf/";
+    ret = bpf_prog_load(path, BPF_PROG_TYPE_XRP, &obj, &progfd);
+    if (ret) {
+        printf("Failed to load bpf program\n");
+        // exit(1);
+    }
+    ret =  bpf_object__pin_programs(obj,pin_floder);
+    if (ret) {
+        printf("Failed to pin bpf program\n");
+        // exit(1);
+    }
+    
+    return ret;
+}
+
+static char* find_path_by_ino(const char* path, ino_t ino) 
+{
+    DIR* dp;
+    struct dirent* dirp;
+    char* sub_path = NULL;
+    char* child_path = NULL;
+    char* file_path = NULL;
+	errno = 0;
+    if((dp = opendir(path)) == NULL) {
+		switch (errno) {
+            case EACCES: printf("Permission denied\n"); break;
+            case ENOENT: printf("Directory does not exist\n"); break;
+            case ENOTDIR: printf("'%s' is not a directory\n", path); break;
+        }
+        perror("opendir error");
+        return NULL;
+    }
+
+    while((dirp = readdir(dp)) != NULL) {
+        if(dirp->d_ino == ino) {
+            file_path = strdup(dirp->d_name);
+            break;
+        }
+
+        if(dirp->d_type == DT_DIR &&strcmp(dirp->d_name, ".") != 0 && strcmp(dirp->d_name, "..") != 0) {
+            child_path = (char*)malloc(strlen(path) + strlen(dirp->d_name) + 3);
+            sprintf(child_path, "%s/%s", path, dirp->d_name);
+            sub_path = find_path_by_ino(child_path, ino);
+            free(child_path);
+            if(sub_path != NULL) {
+                file_path = (char*)malloc(strlen(sub_path) + strlen(dirp->d_name) + 2);
+                sprintf(file_path, "%s/%s", dirp->d_name, sub_path);
+                free(sub_path);
+                break;
+            }
+        }
+    }
+
+    closedir(dp);
+    return file_path;
+}
+
+// static char* find_path_by_ino_2(const char* path, ino_t ino) 
+// {
+//     DIR* dp;
+//     struct dirent* dirp;
+//     char* sub_path = NULL;
+//     char* child_path = NULL;
+//     char* file_path = NULL;
+// 	char* final_path = NULL;
+// 	errno = 0;
+//     if((dp = opendir(path)) == NULL) {
+// 		switch (errno) {
+//             case EACCES: printf("Permission denied\n"); break;
+//             case ENOENT: printf("Directory does not exist\n"); break;
+//             case ENOTDIR: printf("'%s' is not a directory\n", path); break;
+//         }
+//         perror("opendir error");
+//         return NULL;
+//     }
+
+//     while((dirp = readdir(dp)) != NULL) {
+//         if(dirp->d_ino == ino) {
+//             file_path = strdup(dirp->d_name);
+//             break;
+//         }
+
+//         if(dirp->d_type == DT_DIR &&strcmp(dirp->d_name, ".") != 0 && strcmp(dirp->d_name, "..") != 0) {
+//             child_path = (char*)malloc(strlen(path) + strlen(dirp->d_name) + 3);
+//             sprintf(child_path, "%s/%s", path, dirp->d_name);
+//             sub_path = find_path_by_ino_2(child_path, ino);
+//             free(child_path);
+//             if(sub_path != NULL) {
+//                 file_path = (char*)malloc(strlen(sub_path) + strlen(dirp->d_name) + 2);
+//                 sprintf(file_path, "%s/%s", dirp->d_name, sub_path);
+//                 free(sub_path);
+//                 break;
+//             }
+//         }
+//     }
+
+//     closedir(dp);
+// 	final_path = (char*)malloc(strlen(path) + strlen(file_path));
+// 	sprintf(final_path, "%s/%s", path, file_path);
+//     return final_path;
+// }
+
+static void lo_load_ebpf(fuse_req_t req, fuse_ino_t ino, size_t size,
 		    off_t offset, struct fuse_file_info *fi)
 {
 
-	const char* share_floder = "/swap";
+	const char* share_floder = "/";
 	struct fuse_session *se;
 	struct fuse_chan *ch;
 	// VuVirtq *q;
 	ch = req->ch;
 	se = req->se;
-
+    int ret;
 	char *res_buf = (char *) aligned_alloca(0x1000, 0x1000);
 	char *scratch = (char *) aligned_alloca(0x1000, SCRATCH_SIZE);
 	memset(res_buf, 0, 0x1000);
     memset(scratch, 0, 0x1000);
+    // load the eBPF program and pin to the ebpffs
+	if(req->bpf_ino!=0)
+	{
+		if(!se->bpf_func)
+			{
+				char* bpf_path = find_path_by_ino(share_floder, req->bpf_ino);
+				ret = load_bpf_program(bpf_path);
+				free(bpf_path);
+				se->bpf_func =1;
+			}
+	}
 
-	// read the req info froem swap file
-	char* swap_path = find_path_by_ino_2(share_floder, req->swap_ino);
-
-	int swap_fd = open(swap_path, O_RDWR); 
-	if (swap_fd == -1) {
-        printf("Failed to open file.\n");
-        exit(1);
-    }
-	free(swap_path);
-	
-	pread(swap_fd, scratch, sizeof(struct ScatterGatherQuery),0);
-
-	int db_fd = lo_fi_fd(req, fi);
-	// invode bpf_function provide by kernel
-	
-	long ret = syscall(SYS_READ_XRP, db_fd, res_buf, size, offset, se->bpf_fd, scratch);
-	// save the result to swap_file
-
-	ssize_t num_written = pwrite(swap_fd, scratch, sizeof(struct ScatterGatherQuery),0);
-    if (num_written == -1) {
-    printf("Error writeing file \n");
-    exit(1);
-    }
-	close(swap_fd); 
-
-	if (ret >= 0) {
-	struct fuse_out_header out = {
-			.unique = req->unique,
-			.error = 0,
-			.len = sizeof(struct fuse_out_header) + size,
-		};
-	struct iovec iov = {
-			.iov_base = &out,
-			.iov_len = sizeof(struct fuse_out_header),
-		};
-	fuse_send_msg_ib(se, ch, &iov, 1);
-
-	fuse_free_req(req);
-	
+	if (ret) {
+        fuse_reply_err(req, EAGAIN);
 	} else {
-		fuse_reply_err(req, EAGAIN);
+		
+        struct fuse_out_header out = {
+        .unique = req->unique,
+        .error = 0,
+        .len = sizeof(struct fuse_out_header) + size,
+		};
+        struct iovec iov = {
+                .iov_base = &out,
+                .iov_len = sizeof(struct fuse_out_header),
+            };
+        fuse_send_msg_ib(se, ch, &iov, 1);
+
+        fuse_free_req(req);
 	}
 }
 
@@ -3922,7 +3972,7 @@ static struct fuse_lowlevel_ops lo_oper = {
     .listxattr = lo_listxattr,
     .setxattr = lo_setxattr,
     .removexattr = lo_removexattr,
-    .readebpf = lo_ebpfread,
+    .loadebpf = lo_load_ebpf,
 #ifdef HAVE_COPY_FILE_RANGE
     .copy_file_range = lo_copy_file_range,
 #endif
@@ -4465,11 +4515,11 @@ int main(int argc, char *argv[])
     struct fuse_session *se;
     struct fuse_cmdline_opts opts;
     struct lo_data lo = {
-        .sandbox = SANDBOX_NAMESPACE,
-        .debug = 0,
+        .sandbox = SANDBOX_CHROOT,
+        .debug = 1,
         .writeback = 0,
         .posix_lock = 0,
-        .allow_direct_io = 0,
+        .allow_direct_io = 1,
         .proc_self_fd = -1,
         .proc_self_task = -1,
         .user_killpriv_v2 = -1,
@@ -4632,8 +4682,7 @@ int main(int argc, char *argv[])
 
     /* Must be before sandbox since it wants /proc */
     setup_capng();
-
-    setup_sandbox(&lo, se, opts.syslog);
+    setup_sandbox(&lo, se, opts.syslog); 
 
     setup_root(&lo, &lo.root);
     /* Block until ctrl+c or fusermount -u */

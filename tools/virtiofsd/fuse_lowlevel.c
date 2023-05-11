@@ -16,8 +16,6 @@
 #include "fuse_opt.h"
 #include "fuse_virtio.h"
 #include <dirent.h>
-#include <bpf/bpf.h>
-#include <bpf/libbpf.h>
 #include <sys/file.h>
 
 #define THREAD_POOL_SIZE 0
@@ -1223,9 +1221,9 @@ static void do_ib(fuse_req_t req, fuse_ino_t nodeid,
 		fprintf(stderr,
 			"unique: %llu, opcode:  %u\n",
 			(unsigned long long) req->unique,
-			FUSE_IB_READ);
+			FUSE_BPF_LOAD);
 	}
-	if (req->se->op.readebpf) {
+	if (req->se->op.loadebpf) {
 		bool compat = req->se->conn.proto_minor < 9;
 		struct fuse_read_in *arg;
 		struct fuse_file_info fi;
@@ -1241,7 +1239,7 @@ static void do_ib(fuse_req_t req, fuse_ino_t nodeid,
 			fi.lock_owner = arg->lock_owner;
 			fi.flags = arg->flags;
 		}
-		req->se->op.readebpf(req, nodeid, arg->size, arg->offset, &fi);
+		req->se->op.loadebpf(req, nodeid, arg->size, arg->offset, &fi);
 	} else
 		fuse_reply_err(req, ENOSYS);
 }
@@ -2440,7 +2438,7 @@ static struct {
     [FUSE_COPY_FILE_RANGE] = { do_copy_file_range, "COPY_FILE_RANGE" },
     [FUSE_LSEEK] = { do_lseek, "LSEEK" },
     [FUSE_SYNCFS] = { do_syncfs, "SYNCFS" },
-    [FUSE_IB_READ] = { do_ib, "IB" },
+    [FUSE_BPF_LOAD] = { do_ib, "IB" },
 };
 
 #define FUSE_MAXOP (sizeof(fuse_ll_ops) / sizeof(fuse_ll_ops[0]))
@@ -2461,60 +2459,6 @@ void fuse_session_process_buf(struct fuse_session *se,
     fuse_session_process_buf_int(se, &bufv, NULL);
 }
 
-int load_bpf_program(char *path) {
-    struct bpf_object *obj;
-    int ret, progfd;
-
-    ret = bpf_prog_load(path, BPF_PROG_TYPE_XRP, &obj, &progfd);
-    if (ret) {
-        printf("Failed to load bpf program\n");
-        exit(1);
-    }
-
-    return progfd;
-}
-
-static char* find_path_by_ino(const char* path, ino_t ino) 
-{
-    DIR* dp;
-    struct dirent* dirp;
-    char* sub_path = NULL;
-    char* child_path = NULL;
-    char* file_path = NULL;
-	errno = 0;
-    if((dp = opendir(path)) == NULL) {
-		switch (errno) {
-            case EACCES: printf("Permission denied\n"); break;
-            case ENOENT: printf("Directory does not exist\n"); break;
-            case ENOTDIR: printf("'%s' is not a directory\n", path); break;
-        }
-        perror("opendir error");
-        return NULL;
-    }
-
-    while((dirp = readdir(dp)) != NULL) {
-        if(dirp->d_ino == ino) {
-            file_path = strdup(dirp->d_name);
-            break;
-        }
-
-        if(dirp->d_type == DT_DIR &&strcmp(dirp->d_name, ".") != 0 && strcmp(dirp->d_name, "..") != 0) {
-            child_path = (char*)malloc(strlen(path) + strlen(dirp->d_name) + 3);
-            sprintf(child_path, "%s/%s", path, dirp->d_name);
-            sub_path = find_path_by_ino(child_path, ino);
-            free(child_path);
-            if(sub_path != NULL) {
-                file_path = (char*)malloc(strlen(sub_path) + strlen(dirp->d_name) + 2);
-                sprintf(file_path, "%s/%s", dirp->d_name, sub_path);
-                free(sub_path);
-                break;
-            }
-        }
-    }
-
-    closedir(dp);
-    return file_path;
-}
 
 /*
  * Restriction:
@@ -2534,7 +2478,7 @@ void fuse_session_process_buf_int(struct fuse_session *se,
     struct fuse_in_header *in;
     struct fuse_req *req;
     int err;
-    const char* share_floder = "/";
+
     /* The first buffer must be a memory buffer */
     assert(!(buf->flags & FUSE_BUF_IS_FD));
 
@@ -2567,21 +2511,9 @@ void fuse_session_process_buf_int(struct fuse_session *se,
     req->ctx.gid = in->gid;
     req->ctx.pid = in->pid;
     req->ch = ch;
-    req->file_ino = in->file_ino;
 	req->bpf_ino = in->bpf_ino;
-	req->swap_ino = in->swap_ino;
 
-	// 装载eBPF程序
-	if(in->bpf_ino!=0)
-	{
-		if(!se->bpf_func)
-			{
-				char* bpf_path = find_path_by_ino(share_floder, req->bpf_ino);
-				se->bpf_fd = load_bpf_program(bpf_path);
-				free(bpf_path);
-				se->bpf_func =1;
-			}
-	}
+
     /*
      * INIT and DESTROY requests are serialized, all other request types
      * run in parallel.  This prevents races between FUSE_INIT and ordinary
@@ -2629,7 +2561,7 @@ void fuse_session_process_buf_int(struct fuse_session *se,
         in->opcode != FUSE_RELEASE && in->opcode != FUSE_READDIR &&
         in->opcode != FUSE_FSYNCDIR && in->opcode != FUSE_RELEASEDIR &&
         in->opcode != FUSE_NOTIFY_REPLY && in->opcode != FUSE_READDIRPLUS &&
-        in->opcode != FUSE_IB_READ) {
+        in->opcode != FUSE_BPF_LOAD) {
         goto reply_err;
     }
 

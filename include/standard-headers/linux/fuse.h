@@ -533,7 +533,7 @@ enum fuse_opcode {
 	FUSE_SETUPMAPPING	= 48,
 	FUSE_REMOVEMAPPING	= 49,
 	FUSE_SYNCFS		= 50,
-	FUSE_IB_READ       = 51,
+	FUSE_BPF_LOAD       = 52,
 	/* CUSE specific operations */
 	CUSE_INIT		= 4096,
 
@@ -684,9 +684,7 @@ struct fuse_read_in {
 	uint64_t	lock_owner;
 	uint32_t	flags;
 	uint32_t	padding;
-	uint64_t	file_ino;
 	uint64_t	bpf_ino;
-	uint64_t	swap_ino;
 };
 
 #define FUSE_COMPAT_WRITE_IN_SIZE 24
@@ -699,9 +697,7 @@ struct fuse_write_in {
 	uint64_t	lock_owner;
 	uint32_t	flags;
 	uint32_t	padding;
-	uint64_t	file_ino;
 	uint64_t	bpf_ino;
-	uint64_t	swap_ino;
 };
 
 struct fuse_write_out {
@@ -873,9 +869,7 @@ struct fuse_in_header {
 	uint32_t	gid;
 	uint32_t	pid;
 	uint32_t	padding;
-	uint64_t	file_ino;
 	uint64_t	bpf_ino;
-	uint64_t	swap_ino;
 };
 
 struct fuse_out_header {

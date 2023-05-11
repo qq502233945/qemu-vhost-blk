@@ -20,7 +20,7 @@
 #define __SNR_ppoll __PNR_ppoll
 #endif
 #endif
-#define __SNR_read_xrp		445
+// #define __SNR_read_xrp		445
 static const int syscall_allowlist[] = {
     /* TODO ireg sem*() syscalls */
     SCMP_SYS(brk),
@@ -121,7 +121,7 @@ static const int syscall_allowlist[] = {
     SCMP_SYS(writev),
     SCMP_SYS(umask),
 
-    SCMP_SYS(read_xrp),
+    // SCMP_SYS(read_xrp),
 	SCMP_SYS(getcwd),
 	SCMP_SYS(bpf),
 	SCMP_SYS(pread64),
@@ -130,6 +130,7 @@ static const int syscall_allowlist[] = {
 	SCMP_SYS(prlimit64),
 	SCMP_SYS(uname),
 	SCMP_SYS(access),
+    
 };
 
 /* Syscalls used when --syslog is enabled */
