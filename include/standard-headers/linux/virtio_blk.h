@@ -163,7 +163,15 @@ struct virtio_blk_config {
  * For legacy virtio, if VIRTIO_F_ANY_LAYOUT is not negotiated,
  * this is the first element of the read scatter-gather list.
  */
+struct host_extent_status {
+	uint32_t es_lblk;	/* first logical block extent covers */
+	uint32_t es_len;	/* length of extent in block */
+	uint64_t es_pblk;	/* first physical block */
+};
 struct virtio_blk_outhdr {
+	unsigned int 	ib_enable;
+	struct host_extent_status ib_es[15];
+	unsigned int 	ib_es_num;
 	/* VIRTIO_BLK_T* */
 	__virtio32 type;
 	/* io priority. */

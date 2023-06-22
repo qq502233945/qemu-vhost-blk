@@ -17,9 +17,14 @@
 #include "virtio-blk-handler.h"
 
 #include "standard-headers/linux/virtio_blk.h"
-
+typedef unsigned char val__t[64];
+struct MaybeValue {
+    char found;
+    val__t value;
+};
 struct virtio_blk_inhdr {
     unsigned char status;
+    struct MaybeValue query;
 };
 
 static bool virtio_blk_sect_range_ok(BlockBackend *blk, uint32_t block_size,

@@ -24,10 +24,14 @@
 #define TYPE_VIRTIO_BLK "virtio-blk-device"
 OBJECT_DECLARE_SIMPLE_TYPE(VirtIOBlock, VIRTIO_BLK)
 
-/* This is the last element of the write scatter-gather list */
-struct virtio_blk_inhdr
-{
+typedef unsigned char val__t[64];
+struct MaybeValue {
+    char found;
+    val__t value;
+};
+struct virtio_blk_inhdr {
     unsigned char status;
+    struct MaybeValue query;
 };
 
 #define VIRTIO_BLK_AUTO_NUM_QUEUES UINT16_MAX
