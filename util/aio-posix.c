@@ -119,7 +119,7 @@ void aio_set_fd_handler(AioContext *ctx,
     qemu_lockcnt_lock(&ctx->list_lock);
 
     node = find_aio_handler(ctx, fd);
-
+    // printf("aio_set_fd_handler is %d\n",fd);
     /* Are we deleting the fd handler? */
     if (!io_read && !io_write && !io_poll) {
         if (node == NULL) {

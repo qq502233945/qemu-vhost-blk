@@ -710,7 +710,7 @@ static inline QCow2ClusterType qcow2_get_cluster_type(BlockDriverState *bs,
                                                       uint64_t l2_entry)
 {
     BDRVQcow2State *s = bs->opaque;
-
+    
     if (l2_entry & QCOW_OFLAG_COMPRESSED) {
         return QCOW2_CLUSTER_COMPRESSED;
     } else if ((l2_entry & QCOW_OFLAG_ZERO) && !has_subclusters(s)) {
@@ -749,7 +749,8 @@ QCow2SubclusterType qcow2_get_subcluster_type(BlockDriverState *bs,
     BDRVQcow2State *s = bs->opaque;
     QCow2ClusterType type = qcow2_get_cluster_type(bs, l2_entry);
     assert(sc_index < s->subclusters_per_cluster);
-
+    // if(bs->is_disk==1)
+    //     printf("qcow2_get_subcluster_type type is %u\n",type);
     if (has_subclusters(s)) {
         switch (type) {
         case QCOW2_CLUSTER_COMPRESSED:

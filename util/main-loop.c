@@ -35,7 +35,7 @@
 #include "qemu/queue.h"
 #include "qemu/compiler.h"
 #include "qom/object.h"
-
+#include <sys/time.h>
 #ifndef _WIN32
 #include <sys/wait.h>
 #endif
@@ -294,6 +294,9 @@ static void glib_pollfds_poll(void)
     GPollFD *pfds = &g_array_index(gpollfds, GPollFD, glib_pollfds_idx);
 
     if (g_main_context_check(context, max_priority, pfds, glib_n_poll_fds)) {
+        // struct timespec stCurTime3;
+        // clock_gettime(CLOCK_REALTIME, &stCurTime3);
+        // printf("glib_pollfds_poll: %ldns\n",stCurTime3.tv_nsec);
         g_main_context_dispatch(context);
     }
 }

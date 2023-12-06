@@ -22,9 +22,13 @@ struct MaybeValue {
     char found;
     val__t value;
 };
+// struct virtio_blk_inhdr {
+//     unsigned char status;
+//     struct MaybeValue query;
+// };
+
 struct virtio_blk_inhdr {
     unsigned char status;
-    struct MaybeValue query;
 };
 
 static bool virtio_blk_sect_range_ok(BlockBackend *blk, uint32_t block_size,

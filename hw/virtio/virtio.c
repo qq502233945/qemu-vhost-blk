@@ -45,6 +45,8 @@
 #include "standard-headers/linux/virtio_iommu.h"
 #include "standard-headers/linux/virtio_mem.h"
 #include "standard-headers/linux/virtio_vsock.h"
+#include "hw/block/block.h"
+#include "hw/virtio/virtio-blk.h"
 #include CONFIG_DEVICES
 
 /* QAPI list of realized VirtIODevices */
@@ -490,11 +492,6 @@ typedef struct VRingAvail
     uint16_t ring[];
 } VRingAvail;
 
-typedef struct VRingUsedElem
-{
-    uint32_t id;
-    uint32_t len;
-} VRingUsedElem;
 
 typedef struct VRingUsed
 {
@@ -605,6 +602,12 @@ const char *virtio_device_names[] = {
     [VIRTIO_ID_BT] = "virtio-bluetooth",
     [VIRTIO_ID_GPIO] = "virtio-gpio"
 };
+
+static int __sys_io_uring_register(int fd, unsigned opcode, const void *arg,
+			    unsigned nr_args)
+{
+	return syscall(__NR_io_uring_register, fd, opcode, arg, nr_args);
+}
 
 static const char *virtio_id_to_name(uint16_t device_id)
 {
@@ -778,7 +781,7 @@ static inline uint16_t vring_avail_idx(VirtQueue *vq)
 {
     VRingMemoryRegionCaches *caches = vring_get_region_caches(vq);
     hwaddr pa = offsetof(VRingAvail, idx);
-
+    // printf("thr VRingMemoryRegionCaches size is %lu\n",sizeof(VRingMemoryRegionCaches));
     if (!caches) {
         return 0;
     }
@@ -859,8 +862,9 @@ static inline void vring_used_idx_set(VirtQueue *vq, uint16_t val)
         virtio_stw_phys_cached(vq->vdev, &caches->used, pa, val);
         address_space_cache_invalidate(&caches->used, pa, sizeof(val));
     }
-
+    // printf("vring_used_idx_set new used os %d\n",val);
     vq->used_idx = val;
+
 }
 
 /* Called within rcu_read_lock().  */
@@ -910,7 +914,7 @@ static inline void vring_set_avail_event(VirtQueue *vq, uint16_t val)
     if (!caches) {
         return;
     }
-
+    // printf("new  cache avail_idx is %u\n ",val);
     pa = offsetof(VRingUsed, ring[vq->vring.num]);
     virtio_stw_phys_cached(vq->vdev, &caches->used, pa, val);
     address_space_cache_invalidate(&caches->used, pa, sizeof(val));
@@ -921,10 +925,13 @@ static void virtio_queue_split_set_notification(VirtQueue *vq, int enable)
     RCU_READ_LOCK_GUARD();
 
     if (virtio_vdev_has_feature(vq->vdev, VIRTIO_RING_F_EVENT_IDX)) {
+        // printf("---- shadow_avail_idx is %u, last_avail_idx is %u\n", vq->shadow_avail_idx,vq->last_avail_idx);
         vring_set_avail_event(vq, vring_avail_idx(vq));
     } else if (enable) {
+         printf("---------------------\n ");
         vring_used_flags_unset_bit(vq, VRING_USED_F_NO_NOTIFY);
     } else {
+        
         vring_used_flags_set_bit(vq, VRING_USED_F_NO_NOTIFY);
     }
     if (enable) {
@@ -1085,7 +1092,7 @@ static int virtio_queue_empty_rcu(VirtQueue *vq)
     if (virtio_device_disabled(vq->vdev)) {
         return 1;
     }
-
+    // printf("thr VirtQueue size is %lu\n",sizeof(VirtQueue));
     if (unlikely(!vq->vring.avail)) {
         return 1;
     }
@@ -1271,6 +1278,7 @@ static void virtqueue_split_fill(VirtQueue *vq, const VirtQueueElement *elem,
 
     uelem.id = elem->index;
     uelem.len = len;
+    // printf("uelem.id is %u,uelem.len is %u\n",uelem.id,uelem.len);
     vring_used_write(vq, &uelem, idx);
 }
 
@@ -1432,7 +1440,7 @@ static bool virtqueue_get_head(VirtQueue *vq, unsigned int idx,
     /* Grab the next descriptor number they're advertising, and increment
      * the index we've seen. */
     *head = vring_avail_ring(vq, idx % vq->vring.num);
-
+    // printf("last is vq->last_avail_idx is %u\n",idx);
     /* If their number is silly, that's a fatal mistake. */
     if (*head >= vq->vring.num) {
         virtio_error(vq->vdev, "Guest says index %u is available", *head);
@@ -1815,6 +1823,7 @@ static bool virtqueue_map_desc(VirtIODevice *vdev, unsigned int *p_num_sg,
         pa += len;
         num_sg++;
     }
+
     ok = true;
 
 out:
@@ -1909,9 +1918,13 @@ static void *virtqueue_split_pop(VirtQueue *vq, size_t sz)
     int rc;
 
     RCU_READ_LOCK_GUARD();
+    // printf("vq idx is %u\n",vq->queue_index);
     if (virtio_queue_empty_rcu(vq)) {
+       
+        // printf("same !\n");
         goto done;
     }
+    // printf("---------------\n");
     /* Needed after virtio_queue_empty(), see comment in
      * virtqueue_num_heads(). */
     smp_rmb();
@@ -1919,18 +1932,27 @@ static void *virtqueue_split_pop(VirtQueue *vq, size_t sz)
     /* When we start there are none of either input nor output. */
     out_num = in_num = elem_entries = 0;
 
+    // printf("shadow_avail_idx is %u, last_avail_idx is %u\n", vq->shadow_avail_idx,vq->last_avail_idx);
     max = vq->vring.num;
+
 
     if (vq->inuse >= vq->vring.num) {
         virtio_error(vdev, "Virtqueue size exceeded");
         goto done;
     }
-
+    //  printf("queue is %u,  \n 
+    // vq shadow_avail_idx  is %u\n 
+    // vq last_avail_idx is %u\n 
+    // vq used idx  is %u\n  
+    // ",vq->queue_index,vq->shadow_avail_idx,vq->last_avail_idx,vq->used_idx);
+    // printf("last is vq->last_avail_idx is %u\n",vq->last_avail_idx);
     if (!virtqueue_get_head(vq, vq->last_avail_idx++, &head)) {
         goto done;
     }
 
+    // printf("last is vq->last_avail_idx is %u\n",vq->last_avail_idx);
     if (virtio_vdev_has_feature(vdev, VIRTIO_RING_F_EVENT_IDX)) {
+        // printf("xxxx shadow_avail_idx is %u, last_avail_idx is %u\n", vq->shadow_avail_idx,vq->last_avail_idx);
         vring_set_avail_event(vq, vq->last_avail_idx);
     }
 
@@ -1956,7 +1978,7 @@ static void *virtqueue_split_pop(VirtQueue *vq, size_t sz)
         }
 
         /* loop over the indirect descriptor table */
-        len = address_space_cache_init(&indirect_desc_cache, vdev->dma_as,
+        len = address_space_cache_init_debug(&indirect_desc_cache, vdev->dma_as,
                                        desc.addr, desc.len, false);
         desc_cache = &indirect_desc_cache;
         if (len < desc.len) {
@@ -2170,7 +2192,7 @@ void *virtqueue_pop(VirtQueue *vq, size_t sz)
     if (virtio_device_disabled(vq->vdev)) {
         return NULL;
     }
-
+    
     if (virtio_vdev_has_feature(vq->vdev, VIRTIO_F_RING_PACKED)) {
         return virtqueue_packed_pop(vq, sz);
     } else {
@@ -2805,7 +2827,7 @@ static void virtio_queue_notify_vq(VirtQueue *vq)
         if (unlikely(vdev->broken)) {
             return;
         }
-
+        
         trace_virtio_queue_notify(vdev, vq - vdev->vq, vq);
         vq->handle_output(vdev, vq);
 
@@ -2862,7 +2884,6 @@ VirtQueue *virtio_add_queue(VirtIODevice *vdev, int queue_size,
                             VirtIOHandleOutput handle_output)
 {
     int i;
-
     for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
         if (vdev->vq[i].vring.num == 0)
             break;
@@ -2876,7 +2897,7 @@ VirtQueue *virtio_add_queue(VirtIODevice *vdev, int queue_size,
     vdev->vq[i].vring.align = VIRTIO_PCI_VRING_ALIGN;
     vdev->vq[i].handle_output = handle_output;
     vdev->vq[i].used_elems = g_new0(VirtQueueElement, queue_size);
-
+    printf("The vq addr is 0x%lx\n",(u_int64_t)&vdev->vq[i]);
     return &vdev->vq[i];
 }
 
@@ -4029,6 +4050,7 @@ static void virtio_queue_host_notifier_aio_poll_end(EventNotifier *n)
 
 void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
 {
+
     aio_set_event_notifier(ctx, &vq->host_notifier, true,
                            virtio_queue_host_notifier_read,
                            virtio_queue_host_notifier_aio_poll,
@@ -4036,6 +4058,17 @@ void virtio_queue_aio_attach_host_notifier(VirtQueue *vq, AioContext *ctx)
     aio_set_event_notifier_poll(ctx, &vq->host_notifier,
                                 virtio_queue_host_notifier_aio_poll_begin,
                                 virtio_queue_host_notifier_aio_poll_end);
+}
+void virtio_bpf_uring_fd_register(VirtQueue *vq, VirtIODevice *vdev)
+{
+    VirtIOBlock *s = VIRTIO_BLK(vdev);
+    BlockDriverState *bs;
+    bs = blk_bs(s->blk);
+    uint32_t vq_fd;
+    vq_fd = vq->host_notifier.rfd;
+    __sys_io_uring_register(bs->ring->ring_fd, IORING_REGISTER_BPF_vqfd, &vq_fd , 0);
+    printf("vq rfd is %d, wfd is %d\n",vq->host_notifier.rfd,vq->host_notifier.wfd);
+
 }
 
 /*
@@ -4337,9 +4370,9 @@ static void virtio_device_class_init(ObjectClass *klass, void *data)
     dc->unrealize = virtio_device_unrealize;
     dc->bus_type = TYPE_VIRTIO_BUS;
     device_class_set_props(dc, virtio_properties);
+   
     vdc->start_ioeventfd = virtio_device_start_ioeventfd_impl;
     vdc->stop_ioeventfd = virtio_device_stop_ioeventfd_impl;
-
     vdc->legacy_features |= VIRTIO_LEGACY_FEATURES;
 
     QTAILQ_INIT(&virtio_list);

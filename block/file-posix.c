@@ -1492,14 +1492,17 @@ static ssize_t handle_aiocb_rw_linear(RawPosixAIOData *aiocb, char *buf)
 {
     ssize_t offset = 0;
     ssize_t len;
-
+    if(aiocb->aio_fildes==9)
+            printf("handle_aiocb_rw_linear offset is %lx,buffer addr is %lx, size is %ld\n",aiocb->aio_offset,(uint64_t)buf,aiocb->aio_nbytes);
     while (offset < aiocb->aio_nbytes) {
         if (aiocb->aio_type & QEMU_AIO_WRITE) {
+            // printf("pwrite\n");
             len = pwrite(aiocb->aio_fildes,
                          (const char *)buf + offset,
                          aiocb->aio_nbytes - offset,
                          aiocb->aio_offset + offset);
         } else {
+            // printf("pread\n");
             len = pread(aiocb->aio_fildes,
                         buf + offset,
                         aiocb->aio_nbytes - offset,
@@ -2117,8 +2120,17 @@ static int coroutine_fn raw_co_prw(BlockDriverState *bs, uint64_t offset,
             .niov           = qiov->niov,
         },
     };
-
+    if(s->fd == 24)
+    {
+        // printf("offset is %lu, byte is %lu\n",offset,bytes);
+        // printf("qiov->niov is %d\n",qiov->niov);
+        // for(int j=0;j<qiov->niov;j++)
+        // {
+        //     printf("iov base is 0x%lx, byte is %lu\n",(uint64_t)qiov->iov[j].iov_base,qiov->iov[j].iov_len);
+        // }
+    }
     assert(qiov->size == bytes);
+    
     return raw_thread_pool_submit(bs, handle_aiocb_rw, &acb);
 }
 

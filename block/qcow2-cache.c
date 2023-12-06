@@ -183,6 +183,8 @@ static int qcow2_cache_entry_flush(BlockDriverState *bs, Qcow2Cache *c, int i)
     int ret = 0;
 
     if (!c->entries[i].dirty || !c->entries[i].offset) {
+        // if(bs->is_disk==1)
+        //     printf("qcow2_cache_entry_flush 0\n");
         return 0;
     }
 
@@ -206,9 +208,13 @@ static int qcow2_cache_entry_flush(BlockDriverState *bs, Qcow2Cache *c, int i)
         ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_REFCOUNT_BLOCK,
                 c->entries[i].offset, c->table_size, false);
     } else if (c == s->l2_table_cache) {
+        if(bs->is_disk==1)
+            printf("qcow2_cache_entry_flush 1\n");
         ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_ACTIVE_L2,
                 c->entries[i].offset, c->table_size, false);
     } else {
+        if(bs->is_disk==1)
+            printf("qcow2_cache_entry_flush 2\n");
         ret = qcow2_pre_write_overlap_check(bs, 0,
                 c->entries[i].offset, c->table_size, false);
     }
@@ -222,7 +228,8 @@ static int qcow2_cache_entry_flush(BlockDriverState *bs, Qcow2Cache *c, int i)
     } else if (c == s->l2_table_cache) {
         BLKDBG_EVENT(bs->file, BLKDBG_L2_UPDATE);
     }
-
+    if(bs->is_disk==1)
+            printf("qcow2_cache_entry_flush 3\n");
     ret = bdrv_pwrite(bs->file, c->entries[i].offset, c->table_size,
                       qcow2_cache_get_table_addr(c, i), 0);
     if (ret < 0) {
@@ -323,6 +330,7 @@ static int qcow2_cache_do_get(BlockDriverState *bs, Qcow2Cache *c,
     BDRVQcow2State *s = bs->opaque;
     int i;
     int ret;
+    int count;
     int lookup_index;
     uint64_t min_lru_counter = UINT64_MAX;
     int min_lru_index = -1;
@@ -338,11 +346,15 @@ static int qcow2_cache_do_get(BlockDriverState *bs, Qcow2Cache *c,
                                 qcow2_cache_get_name(s, c), offset);
         return -EIO;
     }
-
+    
     /* Check if the table is already cached */
     i = lookup_index = (offset / c->table_size * 4) % c->size;
+
+    count = 0;
     do {
         const Qcow2CachedTable *t = &c->entries[i];
+        // if(bs->is_disk==1)
+        //     printf("c addris %lx, t addr is %lx,t->offset  is %lx, offset is %lx,i is %d\n",(uint64_t)c,(uint64_t)t,t->offset,offset,i);
         if (t->offset == offset) {
             goto found;
         }
@@ -353,8 +365,10 @@ static int qcow2_cache_do_get(BlockDriverState *bs, Qcow2Cache *c,
         if (++i == c->size) {
             i = 0;
         }
+        count++;
     } while (i != lookup_index);
-
+        // if(bs->is_disk==1)
+        //     printf("i is %d\n",i);
     if (min_lru_index == -1) {
         /* This can't happen in current synchronous code, but leave the check
          * here as a reminder for whoever starts using AIO with the cache */
@@ -378,7 +392,9 @@ static int qcow2_cache_do_get(BlockDriverState *bs, Qcow2Cache *c,
         if (c == s->l2_table_cache) {
             BLKDBG_EVENT(bs->file, BLKDBG_L2_LOAD);
         }
-
+        
+        // printf("cache miss !, i is %d, offset is %lx, qcow2 addr is %lx\n",i,offset, (uint64_t)qcow2_cache_get_table_addr(c, i));
+        
         ret = bdrv_pread(bs->file, offset, c->table_size,
                          qcow2_cache_get_table_addr(c, i), 0);
         if (ret < 0) {
@@ -390,9 +406,13 @@ static int qcow2_cache_do_get(BlockDriverState *bs, Qcow2Cache *c,
 
     /* And return the right table */
 found:
+    // if(bs->is_disk==1)
+    //         printf("found i is %d\n",i);
     c->entries[i].ref++;
+    // printf("cache hit, i is %d\n",i);
     *table = qcow2_cache_get_table_addr(c, i);
-
+    // if(bs->is_disk==1)
+    //     printf("i is %d, c->table_size is %d ,table addris %lx, table_array addris %lx\n",i, c->table_size ,(uint64_t)*table,(uint64_t)c->table_array);
     trace_qcow2_cache_get_done(qemu_coroutine_self(),
                                c == s->l2_table_cache, i);
 

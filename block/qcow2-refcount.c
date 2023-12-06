@@ -3008,7 +3008,8 @@ int qcow2_check_metadata_overlap(BlockDriverState *bs, int ign, int64_t offset,
             if (l1_sz2 && l1 == NULL) {
                 return -ENOMEM;
             }
-
+            if(bs->is_disk==1)
+                printf("qcow2_check_metadata_overlap, size is %ld",l1_sz2);
             ret = bdrv_pread(bs->file, l1_ofs, l1_sz2, l1, 0);
             if (ret < 0) {
                 g_free(l1);

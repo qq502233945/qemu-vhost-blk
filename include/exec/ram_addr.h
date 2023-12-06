@@ -84,6 +84,12 @@ static inline void *ramblock_ptr(RAMBlock *block, ram_addr_t offset)
     assert(offset_in_ramblock(block, offset));
     return (char *)block->host + offset;
 }
+static inline void *ramblock_ptr_d(RAMBlock *block, ram_addr_t offset)
+{
+    assert(offset_in_ramblock(block, offset));
+    // printf(" rb->host addr is %p rb->used_length is %lu\n",(void *)block->host,block->used_length);
+    return (char *)block->host + offset;
+}
 
 static inline unsigned long int ramblock_recv_bitmap_offset(void *host_addr,
                                                             RAMBlock *rb)

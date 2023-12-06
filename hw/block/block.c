@@ -27,6 +27,8 @@
  * demand.  It's for things like memory devices that (ab)use a block
  * backend to provide persistence.
  */
+
+
 bool blk_check_size_and_read_all(BlockBackend *blk, void *buf, hwaddr size,
                                  Error **errp)
 {

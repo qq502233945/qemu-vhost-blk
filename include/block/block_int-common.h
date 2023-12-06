@@ -35,7 +35,7 @@
 #include "block/snapshot.h"
 #include "qemu/throttle.h"
 #include "qemu/rcu.h"
-
+#include <liburing.h>
 #define BLOCK_FLAG_LAZY_REFCOUNTS   8
 
 #define BLOCK_OPT_SIZE              "size"
@@ -997,11 +997,34 @@ typedef struct BdrvBlockStatusCache {
     int64_t data_end;
 } BdrvBlockStatusCache;
 
+typedef struct fast_map {
+    struct iovec iovec[256];
+    uint32_t in_num;
+    uint32_t out_num;
+    uint32_t type;
+    bool fast;
+    uint32_t wfd;
+    uint32_t fd;
+    uint32_t id;
+    uint64_t offset;
+} Fast_map;
+
 struct BlockDriverState {
     /*
      * Protected by big QEMU lock or read-only after opening.  No special
      * locking needed during I/O...
      */
+    struct io_uring *ring;
+    
+    int  sh_fd;
+    void   *s_ptr;
+    void   *sp_ptr;
+    void   *r_ptr;
+    struct io_uring_params *p;
+    int  up_fd;
+    int  r_fd;
+    Fast_map *fmap;
+    int share_iov;
     int open_flags; /* flags used to open the file, re-used for re-open */
     bool encrypted; /* if true, the media is encrypted */
     bool sg;        /* if true, the device is a /dev/sg* */
@@ -1182,6 +1205,8 @@ struct BlockDriverState {
     CoMutex bsc_modify_lock;
     /* Always non-NULL, but must only be dereferenced under an RCU read guard */
     BdrvBlockStatusCache *block_status_cache;
+    /* diff form system image*/
+    bool is_disk;
 };
 
 struct BlockBackendRootState {

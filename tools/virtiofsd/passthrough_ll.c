@@ -2734,21 +2734,22 @@ static void lo_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t offset,
     fuse_reply_data(req, &buf);
 }
 int load_bpf_program(char *path) {
-    struct bpf_object *obj;
-    int ret, progfd;
-    const char* pin_floder = "/sys/fs/bpf/";
-    ret = bpf_prog_load(path, BPF_PROG_TYPE_XRP, &obj, &progfd);
-    if (ret) {
-        printf("Failed to load bpf program\n");
-        // exit(1);
-    }
-    ret =  bpf_object__pin_programs(obj,pin_floder);
-    if (ret) {
-        printf("Failed to pin bpf program\n");
-        // exit(1);
-    }
+    // struct bpf_object *obj;
+    // int ret, progfd;
+    // const char* pin_floder = "/sys/fs/bpf/";
+    // ret = bpf_prog_load(path, BPF_PROG_TYPE_XRP, &obj, &progfd);
+    // if (ret) {
+    //     printf("Failed to load bpf program\n");
+    //     // exit(1);
+    // }
+    // ret =  bpf_object__pin_programs(obj,pin_floder);
+    // if (ret) {
+    //     printf("Failed to pin bpf program\n");
+    //     // exit(1);
+    // }
     
-    return ret;
+    // return ret;
+    return 0;
 }
 
 static char* find_path_by_ino(const char* path, ino_t ino) 
@@ -2854,6 +2855,7 @@ static void lo_load_ebpf(fuse_req_t req, fuse_ino_t ino, size_t size,
 	memset(res_buf, 0, 0x1000);
     memset(scratch, 0, 0x1000);
     // load the eBPF program and pin to the ebpffs
+    ret = 0;
 	if(req->bpf_ino!=0)
 	{
 		if(!se->bpf_func)

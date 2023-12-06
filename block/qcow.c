@@ -254,6 +254,7 @@ static int qcow_open(BlockDriverState *bs, QDict *options, int flags,
 
     s->l1_table_offset = header.l1_table_offset;
     s->l1_table = g_try_new(uint64_t, s->l1_size);
+    printf("l1_table_addr is %lx\n",(uint64_t)s->l1_table);
     if (s->l1_table == NULL) {
         error_setg(errp, "Could not allocate memory for L1 table");
         ret = -ENOMEM;

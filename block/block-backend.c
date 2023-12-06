@@ -1290,7 +1290,7 @@ blk_co_do_preadv_part(BlockBackend *blk, int64_t offset, int64_t bytes,
     IO_CODE();
 
     blk_wait_while_drained(blk);
-
+    // printf("enter preadv\n");
     /* Call blk_bs() only after waiting, the graph may have changed */
     bs = blk_bs(blk);
     trace_blk_co_preadv(blk, bs, offset, bytes, flags);
@@ -1301,7 +1301,8 @@ blk_co_do_preadv_part(BlockBackend *blk, int64_t offset, int64_t bytes,
     }
 
     bdrv_inc_in_flight(bs);
-
+    
+    
     /* throttling disk I/O */
     if (blk->public.throttle_group_member.throttle_state) {
         throttle_group_co_io_limits_intercept(&blk->public.throttle_group_member,
@@ -1310,7 +1311,9 @@ blk_co_do_preadv_part(BlockBackend *blk, int64_t offset, int64_t bytes,
 
     ret = bdrv_co_preadv_part(blk->root, offset, bytes, qiov, qiov_offset,
                               flags);
+    
     bdrv_dec_in_flight(bs);
+    // printf("out preadv, ret is %d\n",ret);
     return ret;
 }
 
@@ -1364,7 +1367,7 @@ blk_co_do_pwritev_part(BlockBackend *blk, int64_t offset, int64_t bytes,
     IO_CODE();
 
     blk_wait_while_drained(blk);
-
+    // printf("enter pwritev\n");
     /* Call blk_bs() only after waiting, the graph may have changed */
     bs = blk_bs(blk);
     trace_blk_co_pwritev(blk, bs, offset, bytes, flags);
@@ -1375,6 +1378,7 @@ blk_co_do_pwritev_part(BlockBackend *blk, int64_t offset, int64_t bytes,
     }
 
     bdrv_inc_in_flight(bs);
+    
     /* throttling disk I/O */
     if (blk->public.throttle_group_member.throttle_state) {
         throttle_group_co_io_limits_intercept(&blk->public.throttle_group_member,
@@ -1387,7 +1391,9 @@ blk_co_do_pwritev_part(BlockBackend *blk, int64_t offset, int64_t bytes,
 
     ret = bdrv_co_pwritev_part(blk->root, offset, bytes, qiov, qiov_offset,
                                flags);
+    
     bdrv_dec_in_flight(bs);
+    // printf("out pwritev, ret is %d\n",ret);
     return ret;
 }
 
@@ -1521,7 +1527,7 @@ static BlockAIOCB *blk_aio_prwv(BlockBackend *blk, int64_t offset,
 {
     BlkAioEmAIOCB *acb;
     Coroutine *co;
-
+    
     blk_inc_in_flight(blk);
     acb = blk_aio_get(&blk_aio_em_aiocb_info, blk, cb, opaque);
     acb->rwco = (BlkRwCo) {

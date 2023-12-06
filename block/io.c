@@ -1214,7 +1214,10 @@ static int coroutine_fn bdrv_driver_pwritev(BlockDriverState *bs,
         flags &= ~bs->supported_write_flags;
         goto emulate_flags;
     }
-
+    // if(qiov_offset > 0)
+    // {
+    //     printf("bdrv_driver_pwritev qiov->size is %lu, qiov_offset is %lu\n", qiov->size,qiov_offset);
+    // }
     if (qiov_offset > 0 || bytes != qiov->size) {
         qemu_iovec_init_slice(&local_qiov, qiov, qiov_offset, bytes);
         qiov = &local_qiov;

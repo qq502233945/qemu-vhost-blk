@@ -45,7 +45,11 @@ static void virtio_blk_init_request(VirtIOBlock *s, VirtQueue *vq,
     req->next = NULL;
     req->mr_next = NULL;
 }
-
+static int __sys_io_uring_register(int fd, unsigned opcode, const void *arg,
+			    unsigned nr_args)
+{
+	return syscall(__NR_io_uring_register, fd, opcode, arg, nr_args);
+}
 static void virtio_blk_free_request(VirtIOBlockReq *req)
 {
     g_free(req);
@@ -127,7 +131,7 @@ static void virtio_blk_rw_complete(void *opaque, int ret)
                 continue;
             }
         }
-
+        // printf("complete an req, req len is %lu,type is %u\n",req->in_len,req->out.type);
         virtio_blk_req_complete(req, VIRTIO_BLK_S_OK);
         block_acct_done(blk_get_stats(s->blk), &req->acct);
         virtio_blk_free_request(req);
@@ -430,7 +434,7 @@ static void virtio_blk_submit_multireq(BlockBackend *blk, MultiReqBuffer *mrb)
     int i = 0, start = 0, num_reqs = 0, niov = 0, nb_sectors = 0;
     uint32_t max_transfer;
     int64_t sector_num = 0;
-
+    // printf("virtio_blk_submit_multireq type is %u, mrb->num_reqs is %u \n",mrb->is_write, mrb->num_reqs);
     if (mrb->num_reqs == 1) {
         submit_requests(blk, mrb, 0, 1, -1);
         mrb->num_reqs = 0;
@@ -597,6 +601,8 @@ static int virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb)
     uint32_t type;
     struct iovec *in_iov = req->elem.in_sg;
     struct iovec *out_iov = req->elem.out_sg;
+    // BlockDriverState *bs;
+    // int ret;
     unsigned in_num = req->elem.in_num;
     unsigned out_num = req->elem.out_num;
     VirtIOBlock *s = req->dev;
@@ -621,7 +627,15 @@ static int virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb)
         iov_discard_undo(&req->outhdr_undo);
         return -1;
     }
-
+    // bs = blk_bs(s->blk);
+    // if(bs->ring->ring_fd!=0)
+    // {
+    //     ret = io_uring_enter(bs->ring->ring_fd, 0, 0, IORING_ENTER_SQ_WAKEUP, NULL);
+    //     if (ret < 0) {
+    //         printf("Error io_uring_enter...\n");
+    // }
+    // }
+   
     /* We always touch the last byte, so just see how big in_iov is.  */
     req->in_len = iov_size(in_iov, in_num);
     req->in = (void *)in_iov[in_num - 1].iov_base
@@ -640,13 +654,16 @@ static int virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb)
     {
         bool is_write = type & VIRTIO_BLK_T_OUT;
         req->sector_num = virtio_ldq_p(vdev, &req->out.sector);
-
+        // printf("req->sector_num is %lx, is write is %u \n",req->sector_num,is_write);
         if (is_write) {
             qemu_iovec_init_external(&req->qiov, out_iov, out_num);
+            printf("virtio_blk_handle_request is_write is %lu\n",req->qiov.size);
             trace_virtio_blk_handle_write(vdev, req, req->sector_num,
                                           req->qiov.size / BDRV_SECTOR_SIZE);
         } else {
+            
             qemu_iovec_init_external(&req->qiov, in_iov, in_num);
+             printf("virtio_blk_handle_request is_read is %lu\n",req->qiov.size);
             trace_virtio_blk_handle_read(vdev, req, req->sector_num,
                                          req->qiov.size / BDRV_SECTOR_SIZE);
         }
@@ -661,7 +678,7 @@ static int virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb)
 
         block_acct_start(blk_get_stats(s->blk), &req->acct, req->qiov.size,
                          is_write ? BLOCK_ACCT_WRITE : BLOCK_ACCT_READ);
-
+        // printf("******\n");
         /* merge would exceed maximum number of requests or IO direction
          * changes */
         if (mrb->num_reqs > 0 && (mrb->num_reqs == VIRTIO_BLK_MAX_MERGE_REQS ||
@@ -757,6 +774,7 @@ void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
 
     do {
         if (suppress_notifications) {
+            // printf("1111 suppress_notifications vq->notification is %x\n",suppress_notifications);
             virtio_queue_set_notification(vq, 0);
         }
 
@@ -769,6 +787,7 @@ void virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
         }
 
         if (suppress_notifications) {
+            //  printf("2222 suppress_notifications vq->notification is %x\n",suppress_notifications);
             virtio_queue_set_notification(vq, 1);
         }
     } while (!virtio_queue_empty(vq));
@@ -794,6 +813,7 @@ static void virtio_blk_handle_output(VirtIODevice *vdev, VirtQueue *vq)
             return;
         }
     }
+    
     virtio_blk_handle_vq(s, vq);
 }
 
@@ -1119,7 +1139,9 @@ static void virtio_blk_device_realize(DeviceState *dev, Error **errp)
     VirtIOBlock *s = VIRTIO_BLK(dev);
     VirtIOBlkConf *conf = &s->conf;
     Error *err = NULL;
+    BlockDriverState *bs;
     unsigned i;
+    uint64_t vq_addr;
 
     if (!conf->conf.blk) {
         error_setg(errp, "drive property not set");
@@ -1189,10 +1211,17 @@ static void virtio_blk_device_realize(DeviceState *dev, Error **errp)
     s->blk = conf->conf.blk;
     s->rq = NULL;
     s->sector_mask = (s->conf.conf.logical_block_size / BDRV_SECTOR_SIZE) - 1;
-
+    
     for (i = 0; i < conf->num_queues; i++) {
         virtio_add_queue(vdev, conf->queue_size, virtio_blk_handle_output);
     }
+    printf("virtio_blk_device_realize is ok\n");
+    bs = blk_bs(s->blk);
+    printf("virtio_blk_device_realize is ok 1\n");
+    vq_addr = (u_int64_t)vdev->vq;
+    
+    __sys_io_uring_register(bs->ring->ring_fd, IORING_REGISTER_BPF_vqaddr, &vq_addr , 0);
+
     qemu_coroutine_inc_pool_size(conf->num_queues * conf->queue_size / 2);
     virtio_blk_data_plane_create(vdev, conf, &s->dataplane, &err);
     if (err != NULL) {

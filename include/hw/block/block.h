@@ -14,9 +14,15 @@
 #include "exec/hwaddr.h"
 #include "qapi/qapi-types-block-core.h"
 #include "hw/qdev-properties-system.h"
-
+#include "include/hw/block/block.h"
 /* Configuration */
-
+#define	IORING_REGISTER_BPF		26
+#define	IORING_UNREGISTER_BPF	27
+#define	IORING_REGISTER_BPF_vqaddr		28
+#define	IORING_REGISTER_BPF_vqfd	    29
+#define	IORING_REGISTER_BPF_L1Cache		30
+#define	IORING_REGISTER_BPF_L2Cache	    31
+#define	IORING_REGISTER_BPF_L2Ref		32
 typedef struct BlockConf {
     BlockBackend *blk;
     OnOffAuto backend_defaults;
@@ -36,6 +42,28 @@ typedef struct BlockConf {
     BlockdevOnError werror;
 } BlockConf;
 
+
+typedef struct VRingUsedElem
+{
+    uint32_t id;
+    uint32_t len;
+} VRingUsedElem;
+typedef struct Useraddr
+{
+    uint64_t used_idx;
+    uint64_t last_avail_idx;
+    uint64_t caches_used;
+    uint64_t vring_used;
+    uint64_t avail_idx;
+    uint64_t vdev_isr;
+    uint64_t shadow_avail_idx;
+    uint64_t pa;
+    uint32_t vring_num;
+    uint32_t wfd;
+    VRingUsedElem elem;
+} Useraddr;
+
+
 static inline unsigned int get_physical_block_exp(BlockConf *conf)
 {
     unsigned int exp = 0, size;
@@ -48,6 +76,7 @@ static inline unsigned int get_physical_block_exp(BlockConf *conf)
 
     return exp;
 }
+
 
 #define DEFINE_BLOCK_PROPERTIES_BASE(_state, _conf)                     \
     DEFINE_PROP_ON_OFF_AUTO("backend_defaults", _state,                 \

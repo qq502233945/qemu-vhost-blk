@@ -596,7 +596,7 @@ void vhost_svq_set_svq_kick_fd(VhostShadowVirtqueue *svq, int svq_kick_fd)
     EventNotifier *svq_kick = &svq->svq_kick;
     bool poll_stop = VHOST_FILE_UNBIND != event_notifier_get_fd(svq_kick);
     bool poll_start = svq_kick_fd != VHOST_FILE_UNBIND;
-
+    
     if (poll_stop) {
         event_notifier_set_handler(svq_kick, NULL);
     }

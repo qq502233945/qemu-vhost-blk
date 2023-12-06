@@ -331,6 +331,34 @@ static MemoryRegionSection *phys_page_find(AddressSpaceDispatch *d, hwaddr addr)
     }
 }
 
+static MemoryRegionSection *phys_page_find_debug(AddressSpaceDispatch *d, hwaddr addr)
+{
+    PhysPageEntry lp = d->phys_map, *p;
+    Node *nodes = d->map.nodes;
+    MemoryRegionSection *sections = d->map.sections;
+    hwaddr index = addr >> TARGET_PAGE_BITS;
+    int i;
+
+    for (i = P_L2_LEVELS; lp.skip && (i -= lp.skip) >= 0;) {
+
+        if (lp.ptr == PHYS_MAP_NODE_NIL) {
+            return &sections[PHYS_SECTION_UNASSIGNED];
+        }
+        p = nodes[lp.ptr];
+        lp = p[(index >> (i * P_L2_BITS)) & (P_L2_SIZE - 1)];
+
+
+    }
+
+    if (section_covers_addr(&sections[lp.ptr], addr)) {
+
+        return &sections[lp.ptr];
+    } else {
+
+        return &sections[PHYS_SECTION_UNASSIGNED];
+    }
+}
+
 /* Called from RCU critical section */
 static MemoryRegionSection *address_space_lookup_region(AddressSpaceDispatch *d,
                                                         hwaddr addr,
@@ -350,6 +378,26 @@ static MemoryRegionSection *address_space_lookup_region(AddressSpaceDispatch *d,
     }
     return section;
 }
+static MemoryRegionSection *address_space_lookup_region_dubug(AddressSpaceDispatch *d,
+                                                        hwaddr addr,
+                                                        bool resolve_subpage)
+{
+    MemoryRegionSection *section = qatomic_read(&d->mru_section);
+    subpage_t *subpage;
+
+    if (!section || section == &d->map.sections[PHYS_SECTION_UNASSIGNED] ||
+        !section_covers_addr(section, addr)) {
+        section = phys_page_find_debug(d, addr);
+        qatomic_set(&d->mru_section, section);
+        // printf("due to here \n");
+    }
+    if (resolve_subpage && section->mr->subpage) {
+        
+        subpage = container_of(section->mr, subpage_t, iomem);
+        section = &d->map.sections[subpage->sub_section[SUBPAGE_IDX(addr)]];
+    }
+    return section;
+}
 
 /* Called from RCU critical section */
 static MemoryRegionSection *
@@ -359,7 +407,6 @@ address_space_translate_internal(AddressSpaceDispatch *d, hwaddr addr, hwaddr *x
     MemoryRegionSection *section;
     MemoryRegion *mr;
     Int128 diff;
-
     section = address_space_lookup_region(d, addr, resolve_subpage);
     /* Compute offset within MemoryRegionSection */
     addr -= section->offset_within_address_space;
@@ -386,6 +433,42 @@ address_space_translate_internal(AddressSpaceDispatch *d, hwaddr addr, hwaddr *x
     }
     return section;
 }
+
+static MemoryRegionSection *
+address_space_translate_internal_debug(AddressSpaceDispatch *d, hwaddr addr, hwaddr *xlat,
+                                 hwaddr *plen, bool resolve_subpage)
+{
+    MemoryRegionSection *section;
+    MemoryRegion *mr;
+    Int128 diff;
+    // printf("***************\n");
+    section = address_space_lookup_region_dubug(d, addr, resolve_subpage);
+    /* Compute offset within MemoryRegionSection */
+    addr -= section->offset_within_address_space;
+
+    /* Compute offset within MemoryRegion */
+    *xlat = addr + section->offset_within_region;
+
+    mr = section->mr;
+
+    /* MMIO registers can be expected to perform full-width accesses based only
+     * on their address, without considering adjacent registers that could
+     * decode to completely different MemoryRegions.  When such registers
+     * exist (e.g. I/O ports 0xcf8 and 0xcf9 on most PC chipsets), MMIO
+     * regions overlap wildly.  For this reason we cannot clamp the accesses
+     * here.
+     *
+     * If the length is small (as is the case for address_space_ldl/stl),
+     * everything works fine.  If the incoming length is large, however,
+     * the caller really has to do the clamping through memory_access_size.
+     */
+    if (memory_region_is_ram(mr)) {
+        diff = int128_sub(section->size, int128_make64(addr));
+        *plen = int128_get64(int128_min(diff, int128_make64(*plen)));
+    }
+    return section;
+}
+
 
 /**
  * address_space_translate_iommu - translate an address through an IOMMU
@@ -2337,6 +2420,34 @@ static void *qemu_ram_ptr_length(RAMBlock *ram_block, ram_addr_t addr,
 
     return ramblock_ptr(block, addr);
 }
+static void *qemu_ram_ptr_length_d(RAMBlock *ram_block, ram_addr_t addr,
+                                 hwaddr *size, bool lock)
+{
+    RAMBlock *block = ram_block;
+    if (*size == 0) {
+        return NULL;
+    }
+
+    if (block == NULL) {
+        block = qemu_get_ram_block(addr);
+        addr -= block->offset;
+    }
+    *size = MIN(*size, block->max_length - addr);
+
+    if (xen_enabled() && block->host == NULL) {
+        /* We need to check if the requested address is in the RAM
+         * because we don't want to map the entire memory in QEMU.
+         * In that case just map the requested area.
+         */
+        if (block->offset == 0) {
+            return xen_map_cache(addr, *size, lock, lock);
+        }
+
+        block->host = xen_map_cache(block->offset, block->max_length, 1, lock);
+    }
+
+    return ramblock_ptr_d(block, addr);
+}
 
 /* Return the offset of a hostpointer within a ramblock */
 ram_addr_t qemu_ram_block_host_offset(RAMBlock *rb, void *host)
@@ -3369,6 +3480,7 @@ int64_t address_space_cache_init(MemoryRegionCache *cache,
                                         MEMTXATTRS_UNSPECIFIED);
         cache->ptr = qemu_ram_ptr_length(mr->ram_block, cache->xlat, &l, true);
     } else {
+        printf("+++++++++\n");
         cache->ptr = NULL;
     }
 
@@ -3376,6 +3488,55 @@ int64_t address_space_cache_init(MemoryRegionCache *cache,
     cache->is_write = is_write;
     return l;
 }
+
+int64_t address_space_cache_init_debug(MemoryRegionCache *cache,
+                                 AddressSpace *as,
+                                 hwaddr addr,
+                                 hwaddr len,
+                                 bool is_write)
+{
+    AddressSpaceDispatch *d;
+    hwaddr l;
+    MemoryRegion *mr;
+    Int128 diff;
+
+    assert(len > 0);
+
+    l = len;
+    cache->fv = address_space_get_flatview(as);
+    d = flatview_to_dispatch(cache->fv);
+    cache->mrs = *address_space_translate_internal_debug(d, addr, &cache->xlat, &l, true);
+
+    /*
+     * cache->xlat is now relative to cache->mrs.mr, not to the section itself.
+     * Take that into account to compute how many bytes are there between
+     * cache->xlat and the end of the section.
+     */
+    diff = int128_sub(cache->mrs.size,
+		      int128_make64(cache->xlat - cache->mrs.offset_within_region));
+    l = int128_get64(int128_min(diff, int128_make64(l)));
+
+    mr = cache->mrs.mr;
+    memory_region_ref(mr);
+    if (memory_access_is_direct(mr, is_write)) {
+        /* We don't care about the memory attributes here as we're only
+         * doing this if we found actual RAM, which behaves the same
+         * regardless of attributes; so UNSPECIFIED is fine.
+         */
+        l = flatview_extend_translation(cache->fv, addr, len, mr,
+                                        cache->xlat, l, is_write,
+                                        MEMTXATTRS_UNSPECIFIED);
+        cache->ptr = qemu_ram_ptr_length_d(mr->ram_block, cache->xlat, &l, true);
+    } else {
+        printf("+++++++++\n");
+        cache->ptr = NULL;
+    }
+
+    cache->len = l;
+    cache->is_write = is_write;
+    return l;
+}
+
 
 void address_space_cache_invalidate(MemoryRegionCache *cache,
                                     hwaddr addr,

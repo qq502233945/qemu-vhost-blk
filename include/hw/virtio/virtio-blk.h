@@ -31,7 +31,7 @@ struct MaybeValue {
 };
 struct virtio_blk_inhdr {
     unsigned char status;
-    struct MaybeValue query;
+    // struct MaybeValue query;
 };
 
 #define VIRTIO_BLK_AUTO_NUM_QUEUES UINT16_MAX

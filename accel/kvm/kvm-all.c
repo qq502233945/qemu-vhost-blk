@@ -18,7 +18,8 @@
 #include <poll.h>
 
 #include <linux/kvm.h>
-
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
 #include "qemu/atomic.h"
 #include "qemu/option.h"
 #include "qemu/config-file.h"
@@ -1183,7 +1184,7 @@ static int kvm_set_ioeventfd_mmio(int fd, hwaddr addr, uint32_t val,
         .flags = 0,
         .fd = fd,
     };
-
+    // printf("kvm_set_ioeventfd_mmio fs is %d,addr is %lx\n",fd,addr);
     trace_kvm_set_ioeventfd_mmio(fd, (uint64_t)addr, val, assign, size,
                                  datamatch);
     if (!kvm_enabled()) {
@@ -2005,7 +2006,7 @@ static int kvm_irqchip_assign_irqfd(KVMState *s, EventNotifier *event,
 {
     int fd = event_notifier_get_fd(event);
     int rfd = resample ? event_notifier_get_fd(resample) : -1;
-
+    printf("The kvm_irqchip_assign_irqfd, fd is %d\n",fd);
     struct kvm_irqfd irqfd = {
         .fd = fd,
         .gsi = virq,
@@ -2041,7 +2042,7 @@ static int kvm_irqchip_assign_irqfd(KVMState *s, EventNotifier *event,
             kvm_resample_fd_remove(virq);
         }
     }
-
+    printf("The kvm_irqchip_assign_irqfd, fd is %d, rfd is %d\n",fd,rfd);
     if (!kvm_irqfds_enabled()) {
         return -ENOSYS;
     }

@@ -52,7 +52,11 @@
 #include "qemu/range.h"
 #include "qemu/rcu.h"
 #include "block/coroutines.h"
-
+#include <liburing.h>
+#include <execinfo.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
+#include <sys/types.h>
 #ifdef CONFIG_BSD
 #include <sys/ioctl.h>
 #include <sys/queue.h>
@@ -107,7 +111,6 @@ static void bdrv_reopen_commit(BDRVReopenState *reopen_state);
 static void bdrv_reopen_abort(BDRVReopenState *reopen_state);
 
 static bool bdrv_backing_overridden(BlockDriverState *bs);
-
 /* If non-zero, use only whitelisted block drivers */
 static int use_bdrv_whitelist;
 
@@ -1620,9 +1623,10 @@ static int bdrv_open_driver(BlockDriverState *bs, BlockDriver *drv,
 
     bs->drv = drv;
     bs->opaque = g_malloc0(drv->instance_size);
-
+    
     if (drv->bdrv_file_open) {
         assert(!drv->bdrv_needs_filename || bs->filename[0]);
+        printf("bdrv_open 1\n");
         ret = drv->bdrv_file_open(bs, options, open_flags, &local_err);
     } else if (drv->bdrv_open) {
         ret = drv->bdrv_open(bs, options, open_flags, &local_err);
@@ -3811,7 +3815,7 @@ static BlockDriverState *bdrv_open_inherit(const char *filename,
     Error *local_err = NULL;
     QDict *snapshot_options = NULL;
     int snapshot_flags = 0;
-
+    // int shm_fd = 0;
     assert(!child_class || !flags);
     assert(!child_class == !parent);
     GLOBAL_STATE_CODE();
@@ -3836,6 +3840,16 @@ static BlockDriverState *bdrv_open_inherit(const char *filename,
     }
 
     bs = bdrv_new();
+    /**create a share io uring*/
+    // if (strstr(filename, "disk") != NULL) 
+    // {
+    //     printf("io_uring init share memory\n");
+    //     shm_fd = shm_open("io_uring", O_CREAT | O_RDWR, 0666);
+    //     ftruncate(shm_fd, sizeof(struct  io_uring));
+    //     bs->ring = mmap(NULL, sizeof(struct io_uring), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    // }
+
+    
 
     /* NULL means an empty set of options */
     if (options == NULL) {
@@ -4084,6 +4098,7 @@ BlockDriverState *bdrv_open(const char *filename, const char *reference,
                             QDict *options, int flags, Error **errp)
 {
     GLOBAL_STATE_CODE();
+    printf("bdrv_open( is %s\n",filename);
 
     return bdrv_open_inherit(filename, reference, options, flags, NULL,
                              NULL, 0, errp);
@@ -4928,6 +4943,26 @@ static void bdrv_close(BlockDriverState *bs)
     bdrv_drained_begin(bs); /* complete I/O */
     bdrv_flush(bs);
     bdrv_drain(bs); /* in case flush left pending I/O */
+    printf("fille is %s\n",bs->filename);
+    if(bs->ring!=NULL)
+    {
+        io_uring_unregister_files(bs->ring);
+        io_uring_queue_exit(bs->ring);
+        munmap(bs->sp_ptr, sizeof(struct io_uring_params));
+        close(bs->up_fd);
+        // munmap(bs->s_ptr, 16*1024*1024*2);
+        // close(bs->sh_fd);
+        shmdt(bs->s_ptr);
+        shmctl(bs->sh_fd, IPC_RMID, 0);
+        shmdt(bs->r_ptr);
+        shmctl(bs->r_fd, IPC_RMID, 0);
+        shmdt(bs->fmap);
+        shmctl(bs->share_iov, IPC_RMID, 0);      
+
+        shm_unlink("io_uring_params");
+        
+        printf("clean ok\n");
+    }
 
     if (bs->drv) {
         if (bs->drv->bdrv_close) {
@@ -7097,7 +7132,7 @@ void bdrv_img_create(const char *filename, const char *fmt,
         char *full_backing;
         int back_flags;
         QDict *backing_options = NULL;
-
+        
         full_backing =
             bdrv_get_full_backing_filename_from_filename(filename, backing_file,
                                                          &local_err);
@@ -7119,10 +7154,11 @@ void bdrv_img_create(const char *filename, const char *fmt,
             qdict_put_str(backing_options, "driver", backing_fmt);
         }
         qdict_put_bool(backing_options, BDRV_OPT_FORCE_SHARE, true);
-
+        
         bs = bdrv_open(full_backing, NULL, backing_options, back_flags,
                        &local_err);
         g_free(full_backing);
+        
         if (!bs) {
             error_append_hint(&local_err, "Could not open backing image.\n");
             goto out;

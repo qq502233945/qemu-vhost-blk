@@ -43,7 +43,7 @@
 #include "qapi/qapi-visit-block-core.h"
 #include "crypto.h"
 #include "block/aio_task.h"
-
+#include "hw/block/block.h"
 /*
   Differences with QCOW:
 
@@ -116,7 +116,11 @@ static int qcow2_crypto_hdr_read_func(QCryptoBlock *block, size_t offset,
     return 0;
 }
 
-
+// static int __sys_io_uring_register(int fd, unsigned opcode, const void *arg,
+// 			    unsigned nr_args)
+// {
+// 	return syscall(__NR_io_uring_register, fd, opcode, arg, nr_args);
+// }
 static int qcow2_crypto_hdr_init_func(QCryptoBlock *block, size_t headerlen,
                                       void *opaque, Error **errp)
 {
@@ -1043,6 +1047,7 @@ static int qcow2_update_options_prepare(BlockDriverState *bs,
     r->l2_slice_size = l2_cache_entry_size / l2_entry_size(s);
     r->l2_table_cache = qcow2_cache_create(bs, l2_cache_size,
                                            l2_cache_entry_size);
+    printf("r->l2_table_cache addr is %lx\n",(uint64_t)r->l2_table_cache);
     r->refcount_block_cache = qcow2_cache_create(bs, refcount_cache_size,
                                                  s->cluster_size);
     if (r->l2_table_cache == NULL || r->refcount_block_cache == NULL) {
@@ -1208,6 +1213,7 @@ static void qcow2_update_options_commit(BlockDriverState *bs,
         qcow2_cache_destroy(s->refcount_block_cache);
     }
     s->l2_table_cache = r->l2_table_cache;
+    printf("s->l2_table_cache addr is %lx\n",(uint64_t)s->l2_table_cache);
     s->refcount_block_cache = r->refcount_block_cache;
     s->l2_slice_size = r->l2_slice_size;
 
@@ -1305,7 +1311,7 @@ static int coroutine_fn qcow2_do_open(BlockDriverState *bs, QDict *options,
     uint64_t ext_end;
     uint64_t l1_vm_state_index;
     bool update_header = false;
-
+    
     ret = bdrv_pread(bs->file, 0, sizeof(header), &header, 0);
     if (ret < 0) {
         error_setg_errno(errp, -ret, "Could not read qcow2 header");
@@ -1453,7 +1459,7 @@ static int coroutine_fn qcow2_do_open(BlockDriverState *bs, QDict *options,
         has_subclusters(s) ? QCOW_EXTL2_SUBCLUSTERS_PER_CLUSTER : 1;
     s->subcluster_size = s->cluster_size / s->subclusters_per_cluster;
     s->subcluster_bits = ctz32(s->subcluster_size);
-
+    printf("s->cluster_size  is %d, s->subcluster_size is %d \n", s->cluster_size, s->subcluster_size);
     if (s->subcluster_size < (1 << MIN_CLUSTER_BITS)) {
         error_setg(errp, "Unsupported subcluster size: %d", s->subcluster_size);
         ret = -EINVAL;
@@ -1579,6 +1585,7 @@ static int coroutine_fn qcow2_do_open(BlockDriverState *bs, QDict *options,
             ret = -ENOMEM;
             goto fail;
         }
+        printf("l1_table_addr is %lx\n",(uint64_t)s->l1_table);
         ret = bdrv_pread(bs->file, s->l1_table_offset, s->l1_size * L1E_SIZE,
                          s->l1_table, 0);
         if (ret < 0) {
@@ -1588,6 +1595,7 @@ static int coroutine_fn qcow2_do_open(BlockDriverState *bs, QDict *options,
         for(i = 0;i < s->l1_size; i++) {
             s->l1_table[i] = be64_to_cpu(s->l1_table[i]);
         }
+
     }
 
     /* Parse driver-specific options */
@@ -1596,6 +1604,8 @@ static int coroutine_fn qcow2_do_open(BlockDriverState *bs, QDict *options,
         goto fail;
     }
 
+       
+    
     s->flags = flags;
 
     ret = qcow2_refcount_init(bs);
@@ -2144,7 +2154,8 @@ static coroutine_fn int qcow2_handle_l2meta(BlockDriverState *bs,
 
     while (l2meta != NULL) {
         QCowL2Meta *next;
-
+        if(bs->is_disk)
+            printf("qcow2_handle_l2meta\n");
         if (link_l2) {
             ret = qcow2_alloc_cluster_link_l2(bs, l2meta);
             if (ret) {
@@ -2344,10 +2355,13 @@ static coroutine_fn int qcow2_co_preadv_part(BlockDriverState *bs,
             cur_bytes = MIN(cur_bytes,
                             QCOW_MAX_CRYPT_CLUSTERS * s->cluster_size);
         }
-
+        // if(bs->is_disk==1)
+        //     printf("l1 offset is %lx,l2 is %lx,\n",(uint64_t)s->l1_table,(uint64_t)s->l2_table_cache);
         qemu_co_mutex_lock(&s->lock);
         ret = qcow2_get_host_offset(bs, offset, &cur_bytes,
                                     &host_offset, &type);
+        // if(bs->is_disk==1)
+        //     printf(" host_offset is %lx,\n",(uint64_t)host_offset);
         qemu_co_mutex_unlock(&s->lock);
         if (ret < 0) {
             goto out;
@@ -2358,11 +2372,15 @@ static coroutine_fn int qcow2_co_preadv_part(BlockDriverState *bs,
             (type == QCOW2_SUBCLUSTER_UNALLOCATED_PLAIN && !bs->backing) ||
             (type == QCOW2_SUBCLUSTER_UNALLOCATED_ALLOC && !bs->backing))
         {
+            // if(bs->is_disk==1)
+            //     printf("type is unexpected\n");
             qemu_iovec_memset(qiov, qiov_offset, 0, cur_bytes);
         } else {
             if (!aio && cur_bytes != bytes) {
                 aio = aio_task_pool_new(QCOW2_MAX_WORKERS);
             }
+            if(bs->is_disk==1)
+            printf("qcow2_co_preadv_part, host_offset is %lx,offset is %ld, cur_bytes is %u,  qiov_offset is %lx\n",host_offset,offset,cur_bytes,qiov_offset);
             ret = qcow2_add_task(bs, aio, qcow2_co_preadv_task_entry, type,
                                  host_offset, offset, cur_bytes,
                                  qiov, qiov_offset, NULL);
@@ -2374,6 +2392,17 @@ static coroutine_fn int qcow2_co_preadv_part(BlockDriverState *bs,
         bytes -= cur_bytes;
         offset += cur_bytes;
         qiov_offset += cur_bytes;
+
+        if(bs->is_disk==1)
+        {
+            if(bytes!=0)
+            {
+                printf("Error! mutiloop preadv\n");
+                printf("current_byte is %u, bytes is %ld\n",cur_bytes,bytes);
+            }
+        }
+
+                
     }
 
 out:
@@ -2485,18 +2514,21 @@ static int coroutine_fn handle_alloc_space(BlockDriverState *bs,
         uint64_t start_offset = m->alloc_offset + m->cow_start.offset;
         unsigned nb_bytes = m->cow_end.offset + m->cow_end.nb_bytes -
             m->cow_start.offset;
-
+        if(bs->is_disk)
+            printf("handle_alloc_space 0\n");
         if (!m->cow_start.nb_bytes && !m->cow_end.nb_bytes) {
             continue;
         }
-
+        if(bs->is_disk)
+            printf("handle_alloc_space 1\n");
         ret = is_zero_cow(bs, m);
         if (ret < 0) {
             return ret;
         } else if (ret == 0) {
             continue;
         }
-
+        if(bs->is_disk)
+            printf("handle_alloc_space 2\n");
         /*
          * instead of writing zero COW buffers,
          * efficiently zero out the whole clusters
@@ -2507,7 +2539,8 @@ static int coroutine_fn handle_alloc_space(BlockDriverState *bs,
         if (ret < 0) {
             return ret;
         }
-
+        if(bs->is_disk)
+            printf("handle_alloc_space 3\n");
         BLKDBG_EVENT(bs->file, BLKDBG_CLUSTER_ALLOC_SPACE);
         ret = bdrv_co_pwrite_zeroes(s->data_file, start_offset, nb_bytes,
                                     BDRV_REQ_NO_FALLBACK);
@@ -2517,7 +2550,8 @@ static int coroutine_fn handle_alloc_space(BlockDriverState *bs,
             }
             continue;
         }
-
+        if(bs->is_disk)
+            printf("handle_alloc_space 4\n");
         trace_qcow2_skip_cow(qemu_coroutine_self(), m->offset, m->nb_clusters);
         m->skip_cow = true;
     }
@@ -2579,6 +2613,8 @@ static coroutine_fn int qcow2_co_pwritev_task(BlockDriverState *bs,
         trace_qcow2_writev_data(qemu_coroutine_self(), host_offset);
         ret = bdrv_co_pwritev_part(s->data_file, host_offset,
                                    bytes, qiov, qiov_offset, 0);
+        // if(bs->is_disk)
+        //     printf("bdrv_co_pwritev_part host offset is %lx\n",host_offset);
         if (ret < 0) {
             goto out_unlocked;
         }
@@ -2623,9 +2659,11 @@ static coroutine_fn int qcow2_co_pwritev_part(
     uint64_t host_offset;
     QCowL2Meta *l2meta = NULL;
     AioTaskPool *aio = NULL;
-
+    int i=0;
+    // printf("qcow2_co_pwritev_task offset is %lx\n",offset);
     trace_qcow2_writev_start_req(qemu_coroutine_self(), offset, bytes);
-
+    // if(bs->is_disk==1)
+    //     printf("offset %lx, bytes %ld,qiov_offset is %lu, flags %u\n",offset,bytes,qiov_offset,flags);
     while (bytes != 0 && aio_task_pool_status(aio) == 0) {
 
         l2meta = NULL;
@@ -2658,6 +2696,9 @@ static coroutine_fn int qcow2_co_pwritev_part(
         if (!aio && cur_bytes != bytes) {
             aio = aio_task_pool_new(QCOW2_MAX_WORKERS);
         }
+        if(bs->is_disk==1)
+            printf("qcow2_co_pwritev_part, host_offset is %lx,offset is %ld, cur_bytes is %u,  qiov_offset is %lx\n",host_offset,offset,cur_bytes,qiov_offset);
+            
         ret = qcow2_add_task(bs, aio, qcow2_co_pwritev_task_entry, 0,
                              host_offset, offset,
                              cur_bytes, qiov, qiov_offset, l2meta);
@@ -2669,6 +2710,13 @@ static coroutine_fn int qcow2_co_pwritev_part(
         bytes -= cur_bytes;
         offset += cur_bytes;
         qiov_offset += cur_bytes;
+        // if(bs->is_disk==1)
+        // if(bytes!=0)
+        // {
+        //     printf("Error! mutiloop pwritev,origin_bytes is %ld,bytes is %ld, cur_bytes is %u,  offset is %lx\n",origin_bytes,bytes,cur_bytes,offset);
+        //     // printf("current_byte is %u, bytes is %ld\n",cur_bytes,bytes);
+        // }
+        i++;
         trace_qcow2_writev_done_part(qemu_coroutine_self(), cur_bytes);
     }
     ret = 0;

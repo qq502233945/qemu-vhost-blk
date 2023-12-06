@@ -25,7 +25,7 @@
 #include "block/aio.h"
 #include "hw/virtio/virtio-bus.h"
 #include "qom/object_interfaces.h"
-
+#include "qemu/event_notifier.h"
 struct VirtIOBlockDataPlane {
     bool starting;
     bool stopping;
@@ -251,8 +251,9 @@ int virtio_blk_data_plane_start(VirtIODevice *vdev)
     aio_context_acquire(s->ctx);
     for (i = 0; i < nvqs; i++) {
         VirtQueue *vq = virtio_get_queue(s->vdev, i);
-
         virtio_queue_aio_attach_host_notifier(vq, s->ctx);
+        if(i==0)
+            virtio_bpf_uring_fd_register(vq, s->vdev);
     }
     aio_context_release(s->ctx);
     return 0;

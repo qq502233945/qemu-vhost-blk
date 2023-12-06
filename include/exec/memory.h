@@ -2692,6 +2692,11 @@ int64_t address_space_cache_init(MemoryRegionCache *cache,
                                  hwaddr len,
                                  bool is_write);
 
+int64_t address_space_cache_init_debug(MemoryRegionCache *cache,
+                                 AddressSpace *as,
+                                 hwaddr addr,
+                                 hwaddr len,
+                                 bool is_write);
 /**
  * address_space_cache_invalidate: complete a write to a #MemoryRegionCache
  *
