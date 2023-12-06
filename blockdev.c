@@ -1,4 +1,4 @@
-/*
+  /*
  * QEMU host block devices
  *
  * Copyright (c) 2003-2008 Fabrice Bellard
@@ -62,8 +62,24 @@
 #include "qemu/help_option.h"
 #include "qemu/main-loop.h"
 #include "qemu/throttle-options.h"
-
+#include "include/scsi/pr-manager.h"
+#include "block/raw-aio.h"
+#include <string.h>
+#include <liburing.h>
+#include <linux/mman.h>
+#include <sys/mman.h>
+#include <sys/stat.h> 
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
+#include <sys/types.h>
+#include "block/qcow2.h"
+#include "include/hw/block/block.h"
 /* Protected by BQL */
+#define SHM_HUGE_2M 1<<21
+
 QTAILQ_HEAD(, BlockDriverState) monitor_bdrv_states =
     QTAILQ_HEAD_INITIALIZER(monitor_bdrv_states);
 
@@ -85,6 +101,66 @@ static const char *const if_name[IF_COUNT] = {
     [IF_XEN] = "xen",
 };
 
+typedef struct BDRVRawState {
+    int fd;
+    bool use_lock;
+    int type;
+    int open_flags;
+    size_t buf_align;
+
+    /* The current permissions. */
+    uint64_t perm;
+    uint64_t shared_perm;
+
+    /* The perms bits whose corresponding bytes are already locked in
+     * s->fd. */
+    uint64_t locked_perm;
+    uint64_t locked_shared_perm;
+
+    uint64_t aio_max_batch;
+
+    int perm_change_fd;
+    int perm_change_flags;
+    BDRVReopenState *reopen_state;
+
+    bool has_discard:1;
+    bool has_write_zeroes:1;
+    bool use_linux_aio:1;
+    bool use_linux_io_uring:1;
+    int page_cache_inconsistent; /* errno from fdatasync failure */
+    bool has_fallocate;
+    bool needs_alignment;
+    bool force_alignment;
+    bool drop_cache;
+    bool check_cache_dropped;
+    struct {
+        uint64_t discard_nb_ok;
+        uint64_t discard_nb_failed;
+        uint64_t discard_bytes_ok;
+    } stats;
+
+    PRManager *pr_mgr;
+} BDRVRawState;
+
+
+static int __sys_io_uring_register(int fd, unsigned opcode, const void *arg,
+			    unsigned nr_args)
+{
+	return syscall(__NR_io_uring_register, fd, opcode, arg, nr_args);
+}
+// int load_bpf_program(char *path) {
+//     struct bpf_object *obj;
+//     int ret, progfd;
+
+//     ret = bpf_prog_load(path, BPF_PROG_TYPE_XRP, &obj, &progfd);
+//     if (ret) {
+//         printf("Failed to load bpf program\n");
+//         exit(1);
+//     }
+
+//     return progfd;
+// }
+int global_map_init(int *user_map_fd, int *router_fd,int *Qemurouter_fd,int *mapd_fd);
 static int if_max_devs[IF_COUNT] = {
     /*
      * Do not change these numbers!  They govern how drive option
@@ -464,6 +540,97 @@ static OnOffAuto account_get_opt(QemuOpts *opts, const char *name)
     return ON_OFF_AUTO_OFF;
 }
 
+int global_map_init(int *user_map_fd, int *router_fd,int *Qemurouter_fd,int *mapd_fd)
+{
+	int ret,fd1,fd2,fd3,fd4;
+	const char *user_file ="/sys/fs/bpf/User_addr_map";
+	const char *user_router ="/sys/fs/bpf/Router";
+	const char *qemu_router ="/sys/fs/bpf/QemuRouter";
+	const char *map_d ="/sys/fs/bpf/fast_map_d";
+	fd1 = bpf_obj_get(user_file);
+	fd2 = bpf_obj_get(user_router);
+	fd3 = bpf_obj_get(qemu_router);
+	fd4 = bpf_obj_get(map_d);
+	if(fd1<0)
+	{
+		printf("Failed to  user maps from BPFS, so create one\n");
+		fd1 = bpf_map_create(BPF_MAP_TYPE_ARRAY, "User_addr_map",
+					  sizeof(__u32), sizeof(Useraddr), 2048, NULL);
+		if (fd1<0)
+		{
+			printf("usermap create error \n");
+			return 0;
+		}
+
+		ret = bpf_obj_pin(fd1,user_file);
+		if (ret<0)
+		{
+			printf("bpf_obj_pin error \n");
+			return 0;
+		}
+	}
+
+	if(fd2<0)
+	{
+		printf("Failed to  user maps from BPFS, so create one\n");
+		fd2 = bpf_map_create(BPF_MAP_TYPE_ARRAY, "Router",
+					  sizeof(__u32), sizeof(__u32), 8, NULL);
+		if (fd2<0)
+		{
+			printf("usermap create error \n");
+			return 0;
+		}
+
+		ret = bpf_obj_pin(fd2,user_router);
+		if (ret<0)
+		{
+			printf("bpf_obj_pin error \n");
+			return 0;
+		}
+	}
+	if(fd3<0)
+	{
+		printf("Failed to  user maps from BPFS, so create one\n");
+		fd3 = bpf_map_create(BPF_MAP_TYPE_ARRAY, "QemuRouter",
+					  sizeof(__u32), sizeof(__u32), 8, NULL);
+		if (fd3<0)
+		{
+			printf("usermap create error \n");
+			return 0;
+		}
+
+		ret = bpf_obj_pin(fd3,qemu_router);
+		if (ret<0)
+		{
+			printf("bpf_obj_pin error \n");
+			return 0;
+		}
+	}
+	if(fd4<0)
+	{
+		printf("Failed to  user maps from BPFS, so create one\n");
+		fd4= bpf_map_create(BPF_MAP_TYPE_ARRAY, "fast_map_d",
+					  sizeof(__u32), sizeof(Fast_map), 8*256, NULL);
+		if (fd4<0)
+		{
+			printf("usermap create error \n");
+			return 0;
+		}
+
+		ret = bpf_obj_pin(fd4,map_d);
+		if (ret<0)
+		{
+			printf("bpf_obj_pin error \n");
+			return 0;
+		}
+	}
+	*user_map_fd = fd1;
+	*router_fd = fd2;
+	*Qemurouter_fd = fd3;
+	*mapd_fd = fd4; 
+	return 1;
+}
+
 /* Takes the ownership of bs_opts */
 static BlockBackend *blockdev_init(const char *file, QDict *bs_opts,
                                    Error **errp)
@@ -474,7 +641,7 @@ static BlockBackend *blockdev_init(const char *file, QDict *bs_opts,
     OnOffAuto account_invalid, account_failed;
     bool writethrough, read_only;
     BlockBackend *blk;
-    BlockDriverState *bs;
+    BlockDriverState *bs=NULL;
     ThrottleConfig cfg;
     int snapshot = 0;
     Error *error = NULL;
@@ -485,7 +652,15 @@ static BlockBackend *blockdev_init(const char *file, QDict *bs_opts,
     BlockdevDetectZeroesOptions detect_zeroes =
         BLOCKDEV_DETECT_ZEROES_OPTIONS_OFF;
     const char *throttling_group = NULL;
-
+    int ret = 0;
+    char bpf_filename[256] = "/home/joer/ebpf-apps/kernel/hello_kern.o";
+    struct bpf_object *obj;
+    struct bpf_program *prog,*prog2;
+    BDRVQcow2State *qcow2s;
+    uint64_t l1_cache_addr, l2_cache_addr;
+    int bpf_fd[4];
+    int user_map_fd, router_fd,Qemurouter_fd,mapd_fd;
+    struct bpf_map *map1,*map2,*map3,*map4;
     /* Check common options by copying from bs_opts to opts, all other options
      * stay in bs_opts for processing by bdrv_open(). */
     id = qdict_get_try_str(bs_opts, "id");
@@ -604,6 +779,216 @@ static BlockBackend *blockdev_init(const char *file, QDict *bs_opts,
         }
         bs = blk_bs(blk);
 
+        /*here init the iouring*/
+        if (strstr(file, "disk") != NULL) 
+        {
+            
+            bs->sh_fd = shmget(1234, SHM_HUGE_2M, SHM_LOCKED|IPC_CREAT|SHM_HUGE_2M|SHM_HUGETLB|MAP_ANONYMOUS|SHM_R|SHM_W);
+            if (bs->sh_fd == -1 )
+            {
+                printf("semget  is wrong \n");
+            }
+            bs->s_ptr  = shmat(bs->sh_fd, bs->s_ptr, 0);
+            if (bs->s_ptr  == (void *)-1)
+            {
+                printf("semget  is wrong \n");
+            }
+            printf("bs->s_ptr is addr is %p\n",bs->s_ptr);
+
+            bs->r_fd = shmget(12345, sizeof(struct io_uring), IPC_CREAT|0666);
+            if (bs->sh_fd == -1 )
+            {
+                printf("semget  is wrong \n");
+            } 
+            bs->r_ptr  = shmat(bs->r_fd, bs->r_ptr, 0);
+            if (bs->s_ptr  == (void *)-1)
+            {
+                printf("semget  is wrong \n");
+            }
+
+            
+            bs->share_iov = shmget(54321, 256*8*sizeof(Fast_map), IPC_CREAT|0666);
+            if (bs->share_iov  == -1 )
+            {
+                printf("semget  is wrong \n");
+            }
+            bs->fmap = shmat(bs->share_iov, bs->fmap , 0);
+            if (bs->fmap == (void *)-1)
+            {
+                printf("semget  is wrong \n");
+            }
+
+            
+            // size_t s = 16*(2UL * 1024 * 1024);
+            // bs->sh_fd = shm_open("io_uring", O_CREAT | O_TRUNC | O_RDWR, ALLPERMS);
+            // if (bs->sh_fd == -1) {
+            //     printf("io_uring share memory error\n");
+            // }
+            bs->up_fd = shm_open("io_uring_params", O_CREAT | O_TRUNC | O_RDWR, ALLPERMS);
+            if (bs->up_fd == -1) {
+                printf("io_uring share io_uring_params error\n");
+            }
+
+
+            // ftruncate(bs->sh_fd, s);
+            ret = ftruncate(bs->up_fd, sizeof(struct io_uring_params));
+
+
+            // bs->s_ptr = mmap(NULL, s, PROT_READ | PROT_WRITE|PROT_SEM, MAP_SHARED|MAP_HUGETLB|MAP_HUGE_2MB|MAP_ANONYMOUS, bs->sh_fd, 0);
+            // if (bs->s_ptr  == MAP_FAILED) {
+            //     printf("io_uring share memory mmap error\n");
+            // }
+            bs->sp_ptr = mmap(NULL, sizeof(struct io_uring_params), PROT_READ | PROT_WRITE|PROT_SEM, MAP_SHARED, bs->up_fd, 0);
+            if (bs->sp_ptr  == MAP_FAILED) {
+                printf("io_uring share io_uring_params mmap error\n");
+            }
+            bs->ring = bs->r_ptr;
+            bs->p = bs->sp_ptr;
+            memset(bs->s_ptr, 0, SHM_HUGE_2M);
+            
+            ret = global_map_init(&user_map_fd,&router_fd,&Qemurouter_fd,&mapd_fd);
+
+
+            bs->p->flags |= IORING_SETUP_SQPOLL | IORING_SETUP_NO_MMAP;
+            bs->p->resv[0] = bs->p->resv[1] = bs->p->resv[2] = 0;
+            bs->p->sq_thread_idle = 0xfffffff0;
+            ret = io_uring_queue_init_mem(4096, bs->ring, bs->p, bs->s_ptr, SHM_HUGE_2M);
+            printf("ring_fd is %d\n",bs->ring->ring_fd);
+            if (ret== -ENOMEM) {
+                printf("io_uring share memory mmap init error. no enought memory\n");
+            }  
+            if (ret == -EPERM && geteuid()) {
+                fprintf(stdout, "SQPOLL skipped for regular user\n");
+                goto err_no_bs_opts;
+            }
+            int disk_fd = open("/home/joer/p5800/rdisk.raw", __O_DIRECT|O_RDWR);
+            if (disk_fd < 0) { 
+                close(disk_fd);
+            }
+
+
+            ret = io_uring_register_files(bs->ring, &disk_fd, 1);
+            if(ret < 0) 
+            {
+                printf("io_uring_register_files fail , ret is:%d\n",ret);
+                io_uring_unregister_files(bs->ring);
+            }
+            printf("io_uring init success \n");
+            printf("The  io_uring map addr is 0x%lx\n",(u_int64_t)bs->s_ptr);
+            printf("The io_uring  struct addr is 0x%lx\n",(u_int64_t)bs->ring);
+            printf("The iov  struct addr is 0x%lx\n",(u_int64_t)bs->fmap);
+
+            
+
+
+            obj = bpf_object__open_file(bpf_filename, NULL);
+            if (libbpf_get_error(obj)) {
+                printf("ERROR: opening BPF object file failed\n");
+                goto bpf_error;
+
+            }
+            prog = bpf_object__find_program_by_name(obj, "iourng_prog");
+            prog2 = bpf_object__find_program_by_name(obj, "bpf_prog");
+            bpf_program__set_type(prog,BPF_PROG_TYPE_IOURING);
+            bpf_program__set_type(prog2,BPF_PROG_TYPE_IOURING);
+
+            map1 = bpf_object__find_map_by_name(obj, "Router");
+            if (!map1) {
+                printf("Failed to load array of maps from test prog\n");
+            }
+            map2 = bpf_object__find_map_by_name(obj, "User_addr_map");
+            if (!map2) {
+                printf("Failed to load array of maps from test prog\n");
+            }
+            map3 = bpf_object__find_map_by_name(obj, "QemuRouter");
+            if (!map3 ) {
+                printf("Failed to load array of maps from test prog\n");
+            }
+            map4 = bpf_object__find_map_by_name(obj, "fast_map_d");
+            if (!map4 ) {
+                printf("Failed to load array of maps from test prog\n");
+            }
+            ret = bpf_map__reuse_fd(map2,user_map_fd);
+            close(user_map_fd);
+            if(ret < 0)
+            {
+                printf("Failed to reuse_fd 1\n");
+            }
+            ret = bpf_map__reuse_fd(map1,router_fd);
+            close(router_fd);
+            if(ret < 0)
+            {
+                printf("Failed to reuse_fd 2\n");
+            }
+            ret = bpf_map__reuse_fd(map3,Qemurouter_fd);
+            close(Qemurouter_fd);
+            if(ret < 0)
+            {
+                printf("Failed to reuse_fd 3\n");        
+            }
+            ret = bpf_map__reuse_fd(map4,mapd_fd);
+            close(mapd_fd);
+            if(ret < 0)
+            {
+                printf("Failed to reuse_fd 4\n");       
+            }
+
+            if (bpf_object__load(obj)) {
+                printf("ERROR: bpf_object__load object file failed\n");
+                goto bpf_error;               
+                
+            }	
+            
+
+
+            bpf_fd[0] = bpf_program__fd(prog2);
+	        ret = __sys_io_uring_register(bs->ring->ring_fd, IORING_REGISTER_BPF,
+					bpf_fd, 1);
+
+
+
+            printf("here is ok 1\n");
+                    
+            qcow2s = bs->opaque;
+            bs->is_disk = 1;
+            if(qcow2s!=NULL)
+            {
+                    if(qcow2s->l1_table!=NULL)
+                {
+                    l1_cache_addr = (u_int64_t)qcow2s->l1_table;
+                    ret = __sys_io_uring_register(bs->ring->ring_fd, IORING_REGISTER_BPF_L1Cache, &l1_cache_addr, 1);
+                    printf("l1_cache_addr is %lx\n",l1_cache_addr);
+                }
+                printf("here is ok 2\n");
+                if(qcow2s->l2_table_cache!=NULL)
+                {
+                    l2_cache_addr = (u_int64_t)qcow2s->l2_table_cache;
+                    ret = __sys_io_uring_register(bs->ring->ring_fd, IORING_REGISTER_BPF_L2Cache, &l2_cache_addr, 1);
+                    printf("l2_cache_addr is %lx\n",l2_cache_addr);
+                }
+            }
+
+            FILE *fp = fopen("/home/joer/data.bin", "wb");
+            fwrite(&bs->s_ptr, sizeof(u_int64_t), 1, fp);
+            fwrite(&bs->ring, sizeof(u_int64_t), 1, fp); 
+            fwrite(&bs->fmap, sizeof(u_int64_t), 1, fp);
+            fclose(fp);
+            ret = io_uring_enter(bs->ring->ring_fd, 0, 0, IORING_ENTER_SQ_WAKEUP, NULL);
+            if (ret < 0) {
+                printf("Error io_uring_enter...\n");
+            }
+            if(*bs->ring->sq.kflags==1)
+            {
+                ret = io_uring_enter(bs->ring->ring_fd, 0, 0, IORING_ENTER_SQ_WAKEUP, NULL);
+                if (ret < 0) {
+                    printf("Error io_uring_enter...\n");
+                }
+            }
+            printf("kflags is %u.\n",*bs->ring->sq.kflags);
+
+        }
+
+        /**/
         bs->detect_zeroes = detect_zeroes;
 
         block_acct_setup(blk_get_stats(blk), account_invalid, account_failed);
@@ -638,7 +1023,35 @@ err_no_bs_opts:
     qobject_unref(interval_dict);
     qobject_unref(interval_list);
     return blk;
-
+bpf_error:
+        if(bs->ring!=NULL)
+        {
+            io_uring_unregister_files(bs->ring);
+        }
+        if(bs->ring!=NULL)
+        {
+            io_uring_queue_exit(bs->ring);
+        }
+        munmap(bs->sp_ptr, sizeof(struct io_uring_params));
+        if(bs->up_fd!=0)
+            close(bs->up_fd);
+        // munmap(bs->s_ptr, 16*1024*1024*2);
+        // close(bs->sh_fd);
+        if(bs->s_ptr!=NULL)
+        {
+            shmdt(bs->s_ptr);
+            shmctl(bs->sh_fd, IPC_RMID, 0);
+        }
+        if(bs->r_ptr!=NULL)
+        {
+            shmdt(bs->r_ptr);
+            shmctl(bs->r_fd, IPC_RMID, 0);
+        }        
+        if(bs->fmap!=NULL)
+        {
+            shmdt(bs->fmap);
+            shmctl(bs->share_iov, IPC_RMID, 0);  
+        }
 early_err:
     qemu_opts_del(opts);
     qobject_unref(interval_dict);
@@ -671,6 +1084,8 @@ BlockDriverState *bds_tree_init(QDict *bs_opts, Error **errp)
 void blockdev_close_all_bdrv_states(void)
 {
     BlockDriverState *bs, *next_bs;
+    /*clean thr iouring*/
+
 
     GLOBAL_STATE_CODE();
     QTAILQ_FOREACH_SAFE(bs, &monitor_bdrv_states, monitor_list, next_bs) {
